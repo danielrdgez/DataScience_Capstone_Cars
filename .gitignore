@@ -20,11 +20,9 @@ env/
 *.key
 *.pem
 
-# Large or generated data files
-DATA/raw/
-DATA/interim/
-DATA/processed/
-DATA/external/
+# Data files
+DATA/*
+!DATA/.gitkeep
 *.csv
 *.tsv
 *.xlsx
