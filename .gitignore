@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment and secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Large or generated data files
+DATA/raw/
+DATA/interim/
+DATA/processed/
+DATA/external/
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.parquet
+*.feather
+*.sqlite
+*.db
+
+# Model artifacts
+MODELS/artifacts/
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.onnx
+
+# Reports and generated outputs
+reports/
+figures/
+outputs/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
