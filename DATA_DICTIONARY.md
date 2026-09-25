@@ -1,19 +1,25 @@
-# Data Dictionary
+# Data Dictionary: Intended Modeling Dataset
 
-This document describes the source fields and the SQLite tables created by the
-project ingestion scripts. The CSV's original values are retained as text in
-`used_cars`; this avoids silently changing source formatting during import.
+## Dataset identity and grain
 
-## Dataset sources
+The intended model dataset combines six sources: the **US Used Cars Dataset** published on [Kaggle](https://www.kaggle.com/datasets/ananaymital/us-used-cars-dataset/data), NHTSA vPIC VIN decoding, NHTSA safety ratings, NHTSA complaints, NHTSA recalls, and YouTube comments. The Kaggle dataset is described as used-car listing data collected from CarGurus. Download the CSV from Kaggle and place it at `DATA/used_cars_data.csv`.
 
-| Source | Description | Location | Grain |
+The listings are the base data and each source row represents one advertised vehicle listing. `listing_id` identifies a listing when present and is the primary key used by the loader. `price` is the advertised listing price, not a verified sale price. This dataset is a historical snapshot; it should not be interpreted as current market inventory or completed transactions. The final modeling row grain and join/aggregation rules have not yet been implemented and must be made explicit when the integrated dataset is assembled.
+
+The listing import streams the CSV into `used_cars` in `DATA/CAR_DATA.db`. It requires `vin`, `year`, `make_name`, and `model_name`; retains all source columns and values as SQLite `TEXT`; and inserts/replaces rows by `listing_id` (or VIN when no listing ID column exists). NHTSA values are collected separately and YouTube comment records are copied from the pre-existing external database, then all source tables feed the final modeling dataset.
+
+## Modeling source components
+
+| Component | Source and grain | Linkage available for final assembly | Data-specific cautions |
 |---|---|---|---|
-| Used car listings | [US Used Cars Dataset on Kaggle](https://www.kaggle.com/datasets/ananaymital/us-used-cars-dataset/data); listing attributes, vehicle identity, price and seller/listing information | `DATA/used_cars_data.csv` | One source listing per row; `listing_id` is the key when populated |
-| NHTSA vPIC | VIN decode result values | Local SQL Server restore of `DATA/vPICList_lite_2026_09.bak`, using `dbo.spVinDecodeMultiple` | One value per VIN and returned decode variable; up to 100 VINs per procedure call |
-| NHTSA recalls | Recalls by model year, make and model | NHTSA Recalls API `recallsByVehicle`; make/model are validated and canonicalized against the recalls product catalog | One returned record per MMY query |
-| NHTSA complaints | Complaints by model year, make and model | NHTSA Complaints API `complaintsByVehicle`; make/model are validated and canonicalized against the complaints product catalog | One returned record per MMY query |
-| NHTSA safety ratings | Safety ratings by model year, make and model | NHTSA SafetyRatings API | One returned field per query and vehicle variant |
-| YouTube comments | Raw comment records and metadata | `CAR_DATA_FINAL.db`, table `youtube_comments_sentiment` in `E:\Car-Price-Data-Visualization-Learning\CAR_DATA_OUTPUT` | One comment per `comment_id` |
+| Used-car listings | Kaggle CSV at `DATA/used_cars_data.csv`; one row per advertised listing. Fields are listed below. | `vin`; listing `year`, `make_name`, and `model_name`; `listing_id` identifies the source listing. | A VIN can occur on multiple listings. `price` is asking price, not transaction price. |
+| NHTSA vPIC | NHTSA standalone SQL Server backup restored as `vPICList_Lite`; variable/value pairs per distinct VIN in `nhtsa_vpic_values`. | VIN. `model_year_hint` stores the listing year for reference; the decoder derives values from VIN. | The standalone backup provides VIN decoding. VIN screening is basic and does not verify check digits. |
+| NHTSA safety ratings | NHTSA SafetyRatings API; potentially multiple vehicle variants/vehicles per model-year, make, and model query. | Query key uses listing `year`, `make_name`, and `model_name`; response `VehicleId` distinguishes variants. | Ratings describe queried vehicle variants and should not be assumed to identify a specific listed VIN. |
+| NHTSA complaints | NHTSA `complaintsByVehicle` API; zero or more complaint records per model-year, make, and model query. | Query key uses listing year, make, and model after catalog validation/canonicalization. | These are model-level query results, not verified complaint histories for each listed vehicle. Aggregate or represent one-to-many results explicitly. |
+| NHTSA recalls | NHTSA `recallsByVehicle` API; zero or more recall records per model-year, make, and model query. | Query key uses listing year, make, and model after catalog validation/canonicalization. | These are model-level query results, not verified recall histories for each listed vehicle. Aggregate or represent one-to-many results explicitly. |
+| YouTube comments | Collected by `YOUTUBE/YOUTUBE_COMMENTS_API.py` from playlist/video/comment resources in the YouTube Data API. An already-collected table is also available in `E:\Car-Price-Data-Visualization-Learning\CAR_DATA_OUTPUT\CAR_DATA_FINAL.db` and can be copied with the project importer. One comment per `comment_id`. | The API collector writes into `youtube_comments_sentiment` in `DATA/CAR_DATA.db`; the importer copies the existing external table there. Comment rows include `video_id`, `playlist_id`, and `video_title`, not listing VINs. A vehicle-to-video mapping/aggregation rule is needed to connect comments to listings. | Comments are user-generated text around selected videos and are not a representative sample of vehicle owners. The collector stores comment text and metadata; it does not calculate sentiment scores. |
+
+The project-local collector discovers videos from its configured playlists through the YouTube Data API, obtains video titles and top-level comments, records extraction timestamps and persistent fetch status, and saves comment records. The pre-existing external database contains previously collected comments; importing it copies those records and does not rerun collection. Neither workflow calculates sentiment scores.
 
 ## Used car CSV fields
 
@@ -91,53 +97,12 @@ integer only for the NHTSA query key; its stored source value remains text.
 | `width` | Vehicle width, source value and unit |
 | `year` | Model year; used with make and model for NHTSA vehicle endpoints |
 
-## SQLite table fields
+## Modeling considerations
 
-| Table | Fields | Meaning |
-|---|---|---|
-| `used_cars` | All 66 CSV fields above | Listing-grain source data; `listing_id` primary key |
-| `nhtsa_queries` | `query_id`, `query_type`, `model_year`, `make`, `model`, `vin`, `status`, `result_count`, `error`, `fetched_at` | Request ledger; records success/error/invalid VIN and unmatched vehicle catalog keys. For vehicle endpoints one query per source MMY and endpoint; for vPIC one per VIN. |
-| `nhtsa_vpic_values` | `vin`, `model_year_hint`, `variable_id`, `variable_name`, `value`, `fetched_at` | Local vPIC decode values stored as text. `variable_id` remains the returned variable name to keep the existing table key and values compatible. |
-| `nhtsa_recalls` | `query_id`, `record_key`, `model_year`, `make`, `model`, `record_json` | Full NHTSA recall record serialized as JSON; `record_key` is the row position within its query. |
-| `nhtsa_complaints` | `query_id`, `record_key`, `model_year`, `make`, `model`, `record_json` | Full NHTSA complaint record serialized as JSON; `record_key` is the row position within its query. |
-| `nhtsa_safety_rating_values` | `query_id`, `vehicle_id`, `field_name`, `field_value` | Safety response flattened to field/value rows so dynamic NHTSA fields are retained. Values are text. |
-| `youtube_comments_sentiment` | `video_id`, `playlist_id`, `video_title`, `source`, `text`, `extracted_at`, `comment_id`, `author`, `like_count`, `reply_count`, `published_at`, `updated_at` | Imported raw YouTube comment table. `comment_id` is the primary key; this import does not calculate sentiment. |
-
-## Scripts and run sequence
-
-1. `python NHTSA/build_car_data_db.py --load-only` streams the configured CSV
-   into `used_cars` without making queries. Listing values remain unchanged as
-   text. Query-only runs do not reload or replace listing rows.
-2. Run `python NHTSA/build_car_data_db.py --only recalls`, `--only complaints`,
-   or `--only vpic` to query one source. Repeat `--only` flags to run selected
-   sources sequentially. The vPIC task uses the restored local SQL Server
-   backup and batches up to 100 VINs per stored-procedure call. Recall and
-   complaint calls remain remote and use NHTSA's issue-specific make/model
-   catalogs to validate and canonicalize query parameters. Use `--limit N` for
-   a small trial.
-3. `python YOUTUBE/import_youtube_comments.py` copies comments from the
-   configured `CAR_DATA_FINAL.db` into the same `DATA/CAR_DATA.db`.
-
-## Transformation and quality notes
-
-- CSV ingestion is batched; original columns are retained as text. Re-running
-  replaces rows with a matching non-null `listing_id`.
-- NHTSA recall/complaint records are model-year/make/model results. They are not
-  confirmed VIN-specific events and should not be joined to each listing as if
-  they were per-car histories.
-- Safety ratings can contain multiple vehicle variants for one MMY query.
-- VIN format screening for vPIC only rejects lengths outside 3–17 and excluded
-  letters I/O/Q; it does not verify check digits.
-- Recall/complaint keys without an exact normalized make/model match in the
-  corresponding NHTSA product catalog are recorded as `unmatched` and are not
-  sent to that endpoint. Catalog canonicalization is used only for the request;
-  source make/model values in the SQLite result tables are retained unchanged.
-- Recall/complaint API failures are recorded in `nhtsa_queries` with the
-  response body when NHTSA provides one; re-running retries requests.
-- The standalone vPIC backup supports VIN decoding only. Recalls and complaints
-  continue to come from their separate NHTSA APIs.
-- The local `spVinDecodeMultiple` procedure accepts VINs but no model-year
-  override. `model_year_hint` remains the listing's year for reference; the
-  local procedure determines decoded values from the VIN.
-- YouTube comments are observational collected comments, not a representative
-  sample of owners. `text` and `author` are free text / display-name fields.
+- The table grain is a listing, so the same VIN can appear in multiple rows. Decide whether the modeling question is listing-level or vehicle-level before splitting training and evaluation data; repeated VINs across splits can leak vehicle-specific information.
+- vPIC values are VIN-level, safety/complaint/recall data are model-year/make/model-level, and YouTube comments are video-level. Define aggregation and linkage before joining these sources so one-to-many records do not multiply listing rows or imply unsupported vehicle-specific facts.
+- A vehicle-to-video association is not provided by the YouTube comment table itself. Record the mapping source and rule used to connect video/comment features to a vehicle or listing.
+- `price` is the natural candidate target for a listing-price model, but the project has not yet defined a final target, inclusion rules, or feature set. Keep those choices explicit in the model workflow.
+- Numeric and categorical values are stored as source text on import. Parsing, missing-value handling, unit normalization, and category cleanup belong in a documented modeling transformation.
+- Free-text fields such as `description`, image URLs, and seller/location fields may need to be excluded or specially processed depending on the model objective.
+- The source describes listings and asking prices. Predictions should be interpreted as estimates of listed prices within this dataset's collection period and coverage.

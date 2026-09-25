@@ -9,6 +9,7 @@
 - Preserve user-created work. Do not revert or overwrite changes unless the user explicitly asks.
 - Update `README.md` when project structure, setup steps, or workflows change.
 - Update `DATA_DICTIONARY.md` when datasets, fields, sources, or transformations change.
+- Whenever a project change affects documented behavior, update `README.md` and/or `DATA_DICTIONARY.md` in the same change: keep the README current with project workflows and use Mermaid diagrams there when they clarify a workflow; keep the data dictionary limited to data-specific information about the dataset selected for model development.
 - Use clear commit messages that describe the change.
 
 ## Project Notes

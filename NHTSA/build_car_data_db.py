@@ -370,8 +370,8 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=5000)
     parser.add_argument("--delay", type=float, default=0.25, help="Seconds between NHTSA API requests.")
     parser.add_argument("--only", action="append", choices=("all", "recalls", "complaints", "vpic", "safety"),
-                        help="Query one source. Repeat to run sources sequentially; default is all sources.")
-    parser.add_argument("--vpic-server", default="localhost", help="SQL Server instance hosting the restored vPIC backup.")
+                        help="Query one source. Repeat for multiple sources; defaults to local vPIC decoding only.")
+    parser.add_argument("--vpic-server", default="localhost", help="Local SQL Server instance hosting the restored vPIC backup.")
     parser.add_argument("--vpic-database", default="vPICList_Lite", help="Restored local vPIC database name.")
     parser.add_argument("--vpic-driver", default="ODBC Driver 18 for SQL Server", help="Installed SQL Server ODBC driver name.")
     parser.add_argument("--vpic-batch-size", type=int, default=VPIC_BATCH_LIMIT,
@@ -387,7 +387,9 @@ def main() -> None:
     if args.load_listings:
         if not args.csv.exists():
             parser.error(f"CSV not found: {args.csv}")
-    selections = [] if args.load_only else (args.only or ["all"])
+    # The default path is local VIN decoding. Remote NHTSA endpoints are opt-in
+    # because they are separate, slower data collection tasks.
+    selections = [] if args.load_only else (args.only or ["vpic"])
     if "all" in selections and len(selections) != 1:
         parser.error("--only all cannot be combined with other --only selections")
     if "vpic" in selections and not 1 <= args.vpic_batch_size <= VPIC_BATCH_LIMIT:
