@@ -1,108 +1,308 @@
-# Data Dictionary: Intended Modeling Dataset
+# Project Data Dictionary
 
-## Dataset identity and grain
+Verified: 2026-09-25. Database: `DATA/CAR_DATA.db`.
 
-The intended model dataset combines six sources: the **US Used Cars Dataset** published on [Kaggle](https://www.kaggle.com/datasets/ananaymital/us-used-cars-dataset/data), NHTSA vPIC VIN decoding, NHTSA safety ratings, NHTSA complaints, NHTSA recalls, and YouTube comments. The Kaggle dataset is described as used-car listing data collected from CarGurus. Download the CSV from Kaggle and place it at `DATA/used_cars_data.csv`.
+This dictionary describes the selected tables for the modeling workflow in the current local database snapshot. Each column lists up to five distinct non-NULL examples; text examples may be truncated. Distinct counts exclude NULL. The wide local decoder table has a column for every distinct vPIC property registered in this snapshot.
 
-The listings are the base data and each source row represents one advertised vehicle listing. `listing_id` identifies a listing when present and is the primary key used by the loader. `price` is the advertised listing price, not a verified sale price. This dataset is a historical snapshot; it should not be interpreted as current market inventory or completed transactions. The final modeling row grain and join/aggregation rules have not yet been implemented and must be made explicit when the integrated dataset is assembled.
+## Database and table inventory
 
-The listing import streams the CSV into `used_cars` in `DATA/CAR_DATA.db`. It requires `vin`, `year`, `make_name`, and `model_name`; retains all source columns and values as SQLite `TEXT`; and inserts/replaces rows by `listing_id` (or VIN when no listing ID column exists). NHTSA values are collected separately and YouTube comment records are copied from the pre-existing external database, then all source tables feed the final modeling dataset.
+| Table | Purpose | Columns | Rows |
+|---|---|---:|---:|
+| `nhtsa_complaints` | NHTSA complaint records; one source record per query and record key. | 6 | 1,390,528 |
+| `nhtsa_recalls` | NHTSA recall records; one source record per query and record key. | 6 | 26,993 |
+| `nhtsa_safety_rating_values` | Flattened NHTSA safety-rating API fields; one row per query, vehicle variant, and field. | 4 | 16,288 |
+| `nhtsa_vpic_decodes` | Wide local vPIC output; one row per decoded VIN and model-year hint, with one column per decoder variable. | 158 | 3,523 |
+| `used_cars` | Listing records imported from DATA/used_cars_data.csv; one row per source listing identifier. | 66 | 3,000,000 |
 
-## Modeling source components
+## Relationships and interpretation
 
-| Component | Source and grain | Linkage available for final assembly | Data-specific cautions |
-|---|---|---|---|
-| Used-car listings | Kaggle CSV at `DATA/used_cars_data.csv`; one row per advertised listing. Fields are listed below. | `vin`; listing `year`, `make_name`, and `model_name`; `listing_id` identifies the source listing. | A VIN can occur on multiple listings. `price` is asking price, not transaction price. |
-| NHTSA vPIC | NHTSA standalone SQL Server backup restored as `vPICList_Lite`; variable/value pairs per distinct VIN in `nhtsa_vpic_values`. | VIN. `model_year_hint` stores the listing year for reference; the decoder derives values from VIN. | The standalone backup provides VIN decoding. VIN screening is basic and does not verify check digits. |
-| NHTSA safety ratings | NHTSA SafetyRatings API; potentially multiple vehicle variants/vehicles per model-year, make, and model query. | Query key uses listing `year`, `make_name`, and `model_name`; response `VehicleId` distinguishes variants. | Ratings describe queried vehicle variants and should not be assumed to identify a specific listed VIN. |
-| NHTSA complaints | NHTSA `complaintsByVehicle` API; zero or more complaint records per model-year, make, and model query. | Query key uses listing year, make, and model after catalog validation/canonicalization. | These are model-level query results, not verified complaint histories for each listed vehicle. Aggregate or represent one-to-many results explicitly. |
-| NHTSA recalls | NHTSA `recallsByVehicle` API; zero or more recall records per model-year, make, and model query. | Query key uses listing year, make, and model after catalog validation/canonicalization. | These are model-level query results, not verified recall histories for each listed vehicle. Aggregate or represent one-to-many results explicitly. |
-| YouTube comments | Collected by `YOUTUBE/YOUTUBE_COMMENTS_API.py` from playlist/video/comment resources in the YouTube Data API. An already-collected table is also available in `E:\Car-Price-Data-Visualization-Learning\CAR_DATA_OUTPUT\CAR_DATA_FINAL.db` and can be copied with the project importer. One comment per `comment_id`. | The API collector writes into `youtube_comments_sentiment` in `DATA/CAR_DATA.db`; the importer copies the existing external table there. Comment rows include `video_id`, `playlist_id`, and `video_title`, not listing VINs. A vehicle-to-video mapping/aggregation rule is needed to connect comments to listings. | Comments are user-generated text around selected videos and are not a representative sample of vehicle owners. The collector stores comment text and metadata; it does not calculate sentiment scores. |
+- `used_cars.vin` links listing records to `nhtsa_vpic_decodes.vin`; repeated listings may share a VIN.
+- NHTSA complaints, recalls, and safety-rating values are model/year-level enrichments and are not VIN-specific histories.
+- `nhtsa_vpic_decodes` stores the detailed local decode wide: each returned source variable has its own `vpic_*` column, including variables with NULL/empty values.
+- Source values are preserved as text where indicated. Parse numeric and categorical values using the field name and source documentation; missing is not equivalent to zero or false.
+- For vPIC, `IncludeAll=1` requests every decoder variable even when no value is available. SQL NULL means no value was returned for that VIN/property; an empty string is stored separately. NHTSA does not document one universal reason for NULL across variables, so neither NULL nor empty text establishes that the vehicle lacks a feature. Explicit values such as `No`, `Not Applicable`, and `Not Available` are values and must remain distinct. A missing variable row is also not evidence of feature absence; investigate decode completeness or release differences.
+- NHTSA documents decode output as variable/value pairs with `VariableID` and `ValueID`; `ValueID` does not apply to text variables. The official variable list supplies each variable's name, description, and type; the value-list endpoint supplies allowed values for lookup variables.
 
-The project-local collector discovers videos from its configured playlists through the YouTube Data API, obtains video titles and top-level comments, records extraction timestamps and persistent fetch status, and saves comment records. The pre-existing external database contains previously collected comments; importing it copies those records and does not rerun collection. Neither workflow calculates sentiment scores.
 
-## Used car CSV fields
+## `nhtsa_complaints`
 
-The following fields are copied to identically named columns in `used_cars`.
-They are stored as SQLite `TEXT` to preserve the CSV representation (including
-units, blank values, and list-like strings). `year` is interpreted as an
-integer only for the NHTSA query key; its stored source value remains text.
+NHTSA complaint records; one source record per query and record key.
 
-| Field | Description / source meaning |
-|---|---|
-| `vin` | Vehicle identification number supplied with the listing; used for vPIC lookup |
-| `back_legroom` | Rear-seat legroom, source value and unit |
-| `bed` | Truck bed configuration/description |
-| `bed_height` | Bed height, source value and unit |
-| `bed_length` | Bed length, source value and unit |
-| `body_type` | Listing body-style category |
-| `cabin` | Cab configuration |
-| `city` | Listing city |
-| `city_fuel_economy` | City fuel economy, source units |
-| `combine_fuel_economy` | Combined fuel economy, source units |
-| `daysonmarket` | Days listed at the source snapshot |
-| `dealer_zip` | Dealer postal code |
-| `description` | Free-text listing description |
-| `engine_cylinders` | Engine cylinder configuration |
-| `engine_displacement` | Engine displacement, source units |
-| `engine_type` | Engine type/configuration |
-| `exterior_color` | Exterior color description |
-| `fleet` | Fleet vehicle indicator when supplied |
-| `frame_damaged` | Frame damage indicator when supplied |
-| `franchise_dealer` | Franchise-dealer indicator |
-| `franchise_make` | Franchise make associated with dealer |
-| `front_legroom` | Front-seat legroom, source value and unit |
-| `fuel_tank_volume` | Fuel tank capacity, source value and unit |
-| `fuel_type` | Fuel type |
-| `has_accidents` | Reported accident indicator |
-| `height` | Vehicle height, source value and unit |
-| `highway_fuel_economy` | Highway fuel economy, source units |
-| `horsepower` | Engine horsepower |
-| `interior_color` | Interior color description |
-| `isCab` | Source cab indicator |
-| `is_certified` | Certified vehicle indicator |
-| `is_cpo` | Certified pre-owned indicator |
-| `is_new` | New vehicle indicator |
-| `is_oemcpo` | OEM certified pre-owned indicator |
-| `latitude` | Listing/dealer latitude |
-| `length` | Vehicle length, source value and unit |
-| `listed_date` | Listing date supplied by source |
-| `listing_color` | Source listing color category/code |
-| `listing_id` | Listing identifier; primary key in `used_cars` |
-| `longitude` | Listing/dealer longitude |
-| `main_picture_url` | Main listing image URL |
-| `major_options` | Source representation of major options |
-| `make_name` | Listing make; used with `year` and `model_name` for NHTSA queries |
-| `maximum_seating` | Maximum seating capacity/description |
-| `mileage` | Odometer mileage at listing |
-| `model_name` | Listing model; used with `year` and `make_name` for NHTSA queries |
-| `owner_count` | Reported prior-owner count |
-| `power` | Source engine power description |
-| `price` | Asking/listing price, not a confirmed transaction price |
-| `salvage` | Salvage indicator/title status when supplied |
-| `savings_amount` | Source-reported savings amount |
-| `seller_rating` | Seller rating |
-| `sp_id` | Source/provider identifier |
-| `sp_name` | Source/provider name |
-| `theft_title` | Theft-title indicator when supplied |
-| `torque` | Source engine torque description |
-| `transmission` | Transmission code/type |
-| `transmission_display` | Display transmission description |
-| `trimId` | Source trim identifier |
-| `trim_name` | Trim description |
-| `vehicle_damage_category` | Source vehicle damage category |
-| `wheel_system` | Drivetrain/wheel system code |
-| `wheel_system_display` | Display drivetrain description |
-| `wheelbase` | Wheelbase, source value and unit |
-| `width` | Vehicle width, source value and unit |
-| `year` | Model year; used with make and model for NHTSA vehicle endpoints |
+| Column | SQLite type | Definition / interpretation | Distinct non-NULL values | Five distinct examples (when available) |
+|---|---|---|---:|---|
+| `query_id` | `INTEGER` | Internal identifier linking enrichment records to a query-ledger row. Primary-key position 1. Declared NOT NULL. | Not profiled (large table) | `632`<br>`1022`<br>`1043`<br>`1301`<br>`1388` |
+| `record_key` | `TEXT` | Source record key within one query; not globally unique. Primary-key position 2. Declared NOT NULL. | Not profiled (large table) | `0`<br>`1`<br>`2`<br>`3`<br>`4` |
+| `model_year` | `INTEGER` | Model year used for the NHTSA vehicle query or returned source record. | Not profiled (large table) | `2000`<br>`2002`<br>`2003`<br>`2004`<br>`2005` |
+| `make` | `TEXT` | Make used for a query or returned by the source. | Not profiled (large table) | `Toyota`<br>`Mercedes-Benz`<br>`Dodge`<br>`Chevrolet`<br>`Ford` |
+| `model` | `TEXT` | Model used for a query or returned by the source. | Not profiled (large table) | `MR2 Spyder`<br>`C-Class`<br>`CLK-Class`<br>`E-Class`<br>`S-Class` |
+| `record_json` | `TEXT` | Full source response record serialized as JSON text. Declared NOT NULL. | Not profiled (large table) | `{"odiNumber": 10071023, "manufacturer": "Toyota Motor Corporation", "crash": false, "fire": false, "numberO…`<br>`{"odiNumber": 770060, "manufacturer": "Toyota Motor Corporation", "crash": false, "fire": false, "numberOfI…`<br>`{"odiNumber": 8022295, "manufacturer": "Toyota Motor Corporation", "crash": false, "fire": false, "numberOf…`<br>`{"odiNumber": 8020642, "manufacturer": "Toyota Motor Corporation", "crash": false, "fire": false, "numberOf…`<br>`{"odiNumber": 767980, "manufacturer": "Toyota Motor Corporation", "crash": false, "fire": false, "numberOfI…` |
 
-## Modeling considerations
+## `nhtsa_recalls`
 
-- The table grain is a listing, so the same VIN can appear in multiple rows. Decide whether the modeling question is listing-level or vehicle-level before splitting training and evaluation data; repeated VINs across splits can leak vehicle-specific information.
-- vPIC values are VIN-level, safety/complaint/recall data are model-year/make/model-level, and YouTube comments are video-level. Define aggregation and linkage before joining these sources so one-to-many records do not multiply listing rows or imply unsupported vehicle-specific facts.
-- A vehicle-to-video association is not provided by the YouTube comment table itself. Record the mapping source and rule used to connect video/comment features to a vehicle or listing.
-- `price` is the natural candidate target for a listing-price model, but the project has not yet defined a final target, inclusion rules, or feature set. Keep those choices explicit in the model workflow.
-- Numeric and categorical values are stored as source text on import. Parsing, missing-value handling, unit normalization, and category cleanup belong in a documented modeling transformation.
-- Free-text fields such as `description`, image URLs, and seller/location fields may need to be excluded or specially processed depending on the model objective.
-- The source describes listings and asking prices. Predictions should be interpreted as estimates of listed prices within this dataset's collection period and coverage.
+NHTSA recall records; one source record per query and record key.
+
+| Column | SQLite type | Definition / interpretation | Distinct non-NULL values | Five distinct examples (when available) |
+|---|---|---|---:|---|
+| `query_id` | `INTEGER` | Internal identifier linking enrichment records to a query-ledger row. Primary-key position 1. Declared NOT NULL. | 6,606 | `1114`<br>`1294`<br>`1405`<br>`1516`<br>`1528` |
+| `record_key` | `TEXT` | Source record key within one query; not globally unique. Primary-key position 2. Declared NOT NULL. | 33 | `0`<br>`1`<br>`2`<br>`3`<br>`4` |
+| `model_year` | `INTEGER` | Model year used for the NHTSA vehicle query or returned source record. | 60 | `1961`<br>`1963`<br>`1964`<br>`1965`<br>`1966` |
+| `make` | `TEXT` | Make used for a query or returned by the source. | 68 | `Chevrolet`<br>`Buick`<br>`Opel`<br>`Pontiac`<br>`Dodge` |
+| `model` | `TEXT` | Model used for a query or returned by the source. | 912 | `Corvair`<br>`Wildcat`<br>`Biscayne`<br>`Corvette`<br>`Impala` |
+| `record_json` | `TEXT` | Full source response record serialized as JSON text. Declared NOT NULL. | 26,993 | `{"Manufacturer": "GENERAL MOTORS CORP.", "NHTSACampaignNumber": "71V224000", "parkIt": false, "parkOutSide"…`<br>`{"Manufacturer": "GENERAL MOTORS CORP.", "NHTSACampaignNumber": "71V224000", "parkIt": false, "parkOutSide"…`<br>`{"Manufacturer": "GENERAL MOTORS CORP.", "NHTSACampaignNumber": "71V224000", "parkIt": false, "parkOutSide"…`<br>`{"Manufacturer": "GENERAL MOTORS CORP.", "NHTSACampaignNumber": "76V120000", "parkIt": false, "parkOutSide"…`<br>`{"Manufacturer": "GENERAL MOTORS CORP.", "NHTSACampaignNumber": "69V030000", "parkIt": false, "parkOutSide"…` |
+
+## `nhtsa_safety_rating_values`
+
+Flattened NHTSA safety-rating API fields; one row per query, vehicle variant, and field.
+
+| Column | SQLite type | Definition / interpretation | Distinct non-NULL values | Five distinct examples (when available) |
+|---|---|---|---:|---|
+| `query_id` | `INTEGER` | Internal identifier linking enrichment records to a query-ledger row. Primary-key position 1. Declared NOT NULL. | 5,460 | `5415`<br>`5421`<br>`5439`<br>`5454`<br>`5487` |
+| `vehicle_id` | `TEXT` | NHTSA safety-rating vehicle variant identifier; not a VIN. Primary-key position 2. Declared NOT NULL. | 8,144 | `2860`<br>`2898`<br>`2852`<br>`2900`<br>`2859` |
+| `field_name` | `TEXT` | Exact safety API field name or flattened source path. Primary-key position 3. Declared NOT NULL. | 2 | `VehicleDescription`<br>`VehicleId` |
+| `field_value` | `TEXT` | Safety API field value stored as text; interpret using field_name. | 16,288 | `1999 Ford Contour 4-DR.`<br>`3930`<br>`2005 Mercedes-Benz SL-Class C-DR`<br>`1416`<br>`2005 Mercedes-Benz SLK-Class - Convertible` |
+
+## `nhtsa_vpic_decodes`
+
+Wide local vPIC output; one row per decoded VIN and model-year hint, with one column per decoder variable.
+
+| Column | SQLite type | Definition / interpretation | Distinct non-NULL values | Five distinct examples (when available) |
+|---|---|---|---:|---|
+| `vin` | `TEXT` | VIN supplied by the listing or echoed by the decoder; identifier text. Primary-key position 1. Declared NOT NULL. | 3,523 | `00000000011111111`<br>`00000000011615922`<br>`00000000012631735`<br>`00000000012646077`<br>`00000000012686460` |
+| `model_year_hint` | `INTEGER` | Listing model year retained as context for the VIN decode; not the decoder-reported ModelYear. Primary-key position 2. | 75 | `1967`<br>`1925`<br>`1926`<br>`1924`<br>`1968` |
+| `fetched_at` | `TEXT` | Local timestamp when this value was stored. | 1 | `2026-09-25 20:23:26` |
+| `vpic_ABS` | `TEXT` | NHTSA variable `ABS`; label: Antilock Braking System (ABS); variable ID: 86; group: Active Safety System; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_ActiveSafetySysNote` | `TEXT` | NHTSA variable `ActiveSafetySysNote`; label: Active Safety System Note; variable ID: 169; group: Active Safety System; DataType: `string` (text value). Stored as TEXT to preserve source output. | 8 | ``<br>`Lane Keep System, Lane Departure Warning, Forward Collision Warning, Crash Imminent Braking, Adaptive Cruis…`<br>`Acura Watch Plus: Lane Keep System, Lane Departure Warning, Forward Collision Warning, Crash Imminent Braki…`<br>`Lane Keep System, Lane Departure Warning, Forward Collision Warning, Crash Imminent Braking, Adaptive Cruis…`<br>`Rear Cross Traffic Monitor: Standard for Premium; Back-Up Sensors: Optional for Technology Plus; Rear Cross…` |
+| `vpic_AdaptiveCruiseControl` | `TEXT` | NHTSA variable `AdaptiveCruiseControl`; label: Adaptive Cruise Control (ACC); variable ID: 81; group: Active Safety System/Maintaining Safe Distance; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_AdaptiveDrivingBeam` | `TEXT` | NHTSA variable `AdaptiveDrivingBeam`; label: Adaptive Driving Beam (ADB); variable ID: 180; group: Active Safety System/Lighting Technologies; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_AdaptiveHeadlights` | `TEXT` | NHTSA variable `AdaptiveHeadlights`; label: AdaptiveHeadlights; variable ID: not captured; group: not captured; DataType: `not captured` (interpret according to NHTSA variable definition). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_AdditionalErrorText` | `TEXT` | NHTSA variable `AdditionalErrorText`; label: Additional Error Text; variable ID: 156; group: not captured; DataType: `string` (text value). Stored as TEXT to preserve source output. | 19 | `Invalid character(s): 9:G.`<br>`Invalid character(s): 9:S.`<br>`Invalid character(s): 9:J.`<br>`Invalid character(s): 9:R.`<br>`Invalid character(s): 9:A.` |
+| `vpic_AirBagLocCurtain` | `TEXT` | NHTSA variable `AirBagLocCurtain`; label: Curtain Air Bag Locations; variable ID: 55; group: Passive Safety System/Air Bag Location; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 4 | ``<br>`Not Applicable`<br>`1st and 2nd Rows`<br>`1st Row (Driver and Passenger)` |
+| `vpic_AirBagLocFront` | `TEXT` | NHTSA variable `AirBagLocFront`; label: Front Air Bag Locations; variable ID: 65; group: Passive Safety System/Air Bag Location; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`1st Row (Driver and Passenger)` |
+| `vpic_AirBagLocKnee` | `TEXT` | NHTSA variable `AirBagLocKnee`; label: Knee Air Bag Locations; variable ID: 69; group: Passive Safety System/Air Bag Location; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Driver Seat Only` |
+| `vpic_AirBagLocSeatCushion` | `TEXT` | NHTSA variable `AirBagLocSeatCushion`; label: Seat Cushion Air Bag Locations; variable ID: 56; group: Passive Safety System/Air Bag Location; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_AirBagLocSide` | `TEXT` | NHTSA variable `AirBagLocSide`; label: Side Air Bag Locations; variable ID: 107; group: Passive Safety System/Air Bag Location; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`1st Row (Driver and Passenger)` |
+| `vpic_AutoReverseSystem` | `TEXT` | NHTSA variable `AutoReverseSystem`; label: Auto-Reverse System for Windows and Sunroofs; variable ID: 172; group: Active Safety System; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_AutomaticPedestrianAlertingSound` | `TEXT` | NHTSA variable `AutomaticPedestrianAlertingSound`; label: Automatic Pedestrian Alerting Sound (for Hybrid and EV only); variable ID: 173; group: Active Safety System; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_AxleConfiguration` | `TEXT` | NHTSA variable `AxleConfiguration`; label: Axle Configuration; variable ID: 145; group: Mechanical/Drivetrain; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_Axles` | `TEXT` | NHTSA variable `Axles`; label: Axles; variable ID: 41; group: Mechanical/Drivetrain; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 2 | ``<br>`2` |
+| `vpic_BasePrice` | `TEXT` | NHTSA variable `BasePrice`; label: Base Price ($); variable ID: 136; group: General; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 2 | ``<br>`25900.00` |
+| `vpic_BatteryA` | `TEXT` | NHTSA variable `BatteryA`; label: Battery Current (Amps) From; variable ID: 57; group: Mechanical/Battery; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BatteryA_to` | `TEXT` | NHTSA variable `BatteryA_to`; label: Battery Current (Amps) To; variable ID: 132; group: Mechanical/Battery; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BatteryCells` | `TEXT` | NHTSA variable `BatteryCells`; label: Number of Battery Cells per Module; variable ID: 48; group: Mechanical/Battery; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BatteryInfo` | `TEXT` | NHTSA variable `BatteryInfo`; label: Other Battery Info; variable ID: 1; group: Mechanical/Battery; DataType: `string` (text value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BatteryKWh` | `TEXT` | NHTSA variable `BatteryKWh`; label: Battery Energy (KWh) From; variable ID: 59; group: Mechanical/Battery; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BatteryKWh_to` | `TEXT` | NHTSA variable `BatteryKWh_to`; label: Battery Energy (KWh) To; variable ID: 134; group: Mechanical/Battery; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BatteryModules` | `TEXT` | NHTSA variable `BatteryModules`; label: Number of Battery Modules per Pack; variable ID: 137; group: Mechanical/Battery; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BatteryPacks` | `TEXT` | NHTSA variable `BatteryPacks`; label: Number of Battery Packs per Vehicle; variable ID: 138; group: Mechanical/Battery; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BatteryType` | `TEXT` | NHTSA variable `BatteryType`; label: Battery Type; variable ID: 2; group: Mechanical/Battery; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_BatteryV` | `TEXT` | NHTSA variable `BatteryV`; label: Battery Voltage (Volts) From; variable ID: 58; group: Mechanical/Battery; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BatteryV_to` | `TEXT` | NHTSA variable `BatteryV_to`; label: Battery Voltage (Volts) To; variable ID: 133; group: Mechanical/Battery; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BedLengthIN` | `TEXT` | NHTSA variable `BedLengthIN`; label: Bed Length (inches); variable ID: 49; group: Exterior/Dimension; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BedType` | `TEXT` | NHTSA variable `BedType`; label: Bed Type; variable ID: 3; group: Exterior/Truck; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_BlindSpotIntervention` | `TEXT` | NHTSA variable `BlindSpotIntervention`; label: Blind Spot Intervention (BSI); variable ID: 193; group: Active Safety System/Lane and Side Assist; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BlindSpotMon` | `TEXT` | NHTSA variable `BlindSpotMon`; label: Blind Spot Warning (BSW); variable ID: 88; group: Active Safety System/Lane and Side Assist; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 4 | ``<br>`Not Applicable`<br>`Optional`<br>`Standard` |
+| `vpic_BodyCabType` | `TEXT` | NHTSA variable `BodyCabType`; label: Cab Type; variable ID: 4; group: Exterior/Truck; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_BodyClass` | `TEXT` | NHTSA variable `BodyClass`; label: Body Class; variable ID: 5; group: Exterior/Body; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 5 | ``<br>`Truck`<br>`Convertible/Cabriolet`<br>`Sedan/Saloon`<br>`Coupe` |
+| `vpic_BrakeSystemDesc` | `TEXT` | NHTSA variable `BrakeSystemDesc`; label: Brake System Description; variable ID: 52; group: Mechanical/Brake; DataType: `string` (text value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BrakeSystemType` | `TEXT` | NHTSA variable `BrakeSystemType`; label: Brake System Type; variable ID: 42; group: Mechanical/Brake; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BusFloorConfigType` | `TEXT` | NHTSA variable `BusFloorConfigType`; label: Bus Floor Configuration Type; variable ID: 148; group: Exterior/Bus; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_BusLength` | `TEXT` | NHTSA variable `BusLength`; label: Bus Length (feet); variable ID: 147; group: Exterior/Bus; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_BusType` | `TEXT` | NHTSA variable `BusType`; label: Bus Type; variable ID: 149; group: Exterior/Bus; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_CAN_AACN` | `TEXT` | NHTSA variable `CAN_AACN`; label: Automatic Crash Notification (ACN)/Advanced Automatic Crash Notification (AACN); variable ID: 174; group: Active Safety System/911 Notification; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Optional` |
+| `vpic_CIB` | `TEXT` | NHTSA variable `CIB`; label: Crash Imminent Braking (CIB); variable ID: 87; group: Active Safety System/Forward Collision Prevention; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_CashForClunkers` | `TEXT` | NHTSA variable `CashForClunkers`; label: CashForClunkers; variable ID: not captured; group: not captured; DataType: `not captured` (interpret according to NHTSA variable definition). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_ChargerLevel` | `TEXT` | NHTSA variable `ChargerLevel`; label: Charger Level; variable ID: 127; group: Mechanical/Battery/Charger; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_ChargerPowerKW` | `TEXT` | NHTSA variable `ChargerPowerKW`; label: Charger Power (KW); variable ID: 128; group: Mechanical/Battery/Charger; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_CombinedBrakingSystem` | `TEXT` | NHTSA variable `CombinedBrakingSystem`; label: Combined Braking System (CBS); variable ID: 202; group: Exterior/Motorcycle; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_CoolingType` | `TEXT` | NHTSA variable `CoolingType`; label: Cooling Type; variable ID: 122; group: Engine; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Water` |
+| `vpic_CurbWeightLB` | `TEXT` | NHTSA variable `CurbWeightLB`; label: Curb Weight (pounds); variable ID: 54; group: Exterior/Dimension; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 10 | ``<br>`3095`<br>`3014`<br>`3115`<br>`3124` |
+| `vpic_CustomMotorcycleType` | `TEXT` | NHTSA variable `CustomMotorcycleType`; label: Custom Motorcycle Type; variable ID: 151; group: Exterior/Motorcycle; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_DaytimeRunningLight` | `TEXT` | NHTSA variable `DaytimeRunningLight`; label: Daytime Running Light (DRL); variable ID: 177; group: Active Safety System/Lighting Technologies; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_DestinationMarket` | `TEXT` | NHTSA variable `DestinationMarket`; label: Destination Market; variable ID: 10; group: General; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_DisplacementCC` | `TEXT` | NHTSA variable `DisplacementCC`; label: Displacement (CC); variable ID: 11; group: Engine; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 11 | ``<br>`5700.0`<br>`6500.0`<br>`6600.0`<br>`6200.0` |
+| `vpic_DisplacementCI` | `TEXT` | NHTSA variable `DisplacementCI`; label: Displacement (CI); variable ID: 12; group: Engine; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 11 | ``<br>`347.83534133997`<br>`396.65433661575`<br>`402.75671102523`<br>`378.34721338734` |
+| `vpic_DisplacementL` | `TEXT` | NHTSA variable `DisplacementL`; label: Displacement (L); variable ID: 13; group: Engine; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 12 | ``<br>`5.7`<br>`6.5`<br>`6.6`<br>`6.2` |
+| `vpic_Doors` | `TEXT` | NHTSA variable `Doors`; label: Doors; variable ID: 14; group: Exterior/Body; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 3 | ``<br>`4`<br>`2` |
+| `vpic_DriveType` | `TEXT` | NHTSA variable `DriveType`; label: Drive Type; variable ID: 15; group: Mechanical/Drivetrain; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 5 | ``<br>`Not Applicable`<br>`4x2`<br>`4WD/4-Wheel Drive/4x4`<br>`FWD/Front-Wheel Drive` |
+| `vpic_DriverAssist` | `TEXT` | NHTSA variable `DriverAssist`; label: DriverAssist; variable ID: not captured; group: not captured; DataType: `not captured` (interpret according to NHTSA variable definition). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_DynamicBrakeSupport` | `TEXT` | NHTSA variable `DynamicBrakeSupport`; label: Dynamic Brake Support (DBS); variable ID: 170; group: Active Safety System/Forward Collision Prevention; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_EDR` | `TEXT` | NHTSA variable `EDR`; label: Event Data Recorder (EDR); variable ID: 175; group: Active Safety System; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_ESC` | `TEXT` | NHTSA variable `ESC`; label: Electronic Stability Control (ESC); variable ID: 99; group: Active Safety System; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_EVDriveUnit` | `TEXT` | NHTSA variable `EVDriveUnit`; label: EV Drive Unit; variable ID: 72; group: Mechanical/Battery; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_ElectrificationLevel` | `TEXT` | NHTSA variable `ElectrificationLevel`; label: Electrification Level; variable ID: 126; group: Engine; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Strong HEV (Hybrid Electric Vehicle)` |
+| `vpic_EngineConfiguration` | `TEXT` | NHTSA variable `EngineConfiguration`; label: Engine Configuration; variable ID: 64; group: Engine; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 4 | ``<br>`Not Applicable`<br>`V-Shaped`<br>`In-Line` |
+| `vpic_EngineCycles` | `TEXT` | NHTSA variable `EngineCycles`; label: Engine Stroke Cycles; variable ID: 17; group: Engine; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 2 | ``<br>`4` |
+| `vpic_EngineCylinders` | `TEXT` | NHTSA variable `EngineCylinders`; label: Engine Number of Cylinders; variable ID: 9; group: Engine; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 4 | ``<br>`8`<br>`4`<br>`6` |
+| `vpic_EngineHP` | `TEXT` | NHTSA variable `EngineHP`; label: Engine Brake (hp) From; variable ID: 71; group: Engine; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 11 | ``<br>`300`<br>`165`<br>`201`<br>`500` |
+| `vpic_EngineHP_to` | `TEXT` | NHTSA variable `EngineHP_to`; label: Engine Brake (hp) To; variable ID: 125; group: Engine; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_EngineKW` | `TEXT` | NHTSA variable `EngineKW`; label: Engine Power (KW); variable ID: 21; group: Engine; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_EngineManufacturer` | `TEXT` | NHTSA variable `EngineManufacturer`; label: Engine Manufacturer; variable ID: 146; group: Engine; DataType: `string` (text value). Stored as TEXT to preserve source output. | 5 | ``<br>`GEP`<br>`GM-Isuzu`<br>`GM`<br>`Honda` |
+| `vpic_EngineModel` | `TEXT` | NHTSA variable `EngineModel`; label: Engine Model; variable ID: 18; group: Engine; DataType: `string` (text value). Stored as TEXT to preserve source output. | 8 | ``<br>`K24V7`<br>`JNC1`<br>`J32A1`<br>`J32A2` |
+| `vpic_EntertainmentSystem` | `TEXT` | NHTSA variable `EntertainmentSystem`; label: Entertainment System; variable ID: 23; group: Interior; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_ErrorCode` | `TEXT` | NHTSA variable `ErrorCode`; label: Error Code; variable ID: 143; group: not captured; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 11 | `1,7,12,400`<br>`1,7,12`<br>`7,12`<br>`1,7,400`<br>`1,7` |
+| `vpic_ErrorText` | `TEXT` | NHTSA variable `ErrorText`; label: Error Text; variable ID: 191; group: not captured; DataType: `string` (text value). Stored as TEXT to preserve source output. | 11 | `1 - Check Digit (9th position) does not calculate properly; 7 - Manufacturer is not registered with NHTSA f…`<br>`1 - Check Digit (9th position) does not calculate properly; 7 - Manufacturer is not registered with NHTSA f…`<br>`7 - Manufacturer is not registered with NHTSA for sale or importation in the U.S. for use on U.S roads; Ple…`<br>`1 - Check Digit (9th position) does not calculate properly; 7 - Manufacturer is not registered with NHTSA f…`<br>`1 - Check Digit (9th position) does not calculate properly; 7 - Manufacturer is not registered with NHTSA f…` |
+| `vpic_ForwardCollisionWarning` | `TEXT` | NHTSA variable `ForwardCollisionWarning`; label: Forward Collision Warning (FCW); variable ID: 101; group: Active Safety System/Forward Collision Prevention; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_FuelInjectionType` | `TEXT` | NHTSA variable `FuelInjectionType`; label: Fuel Delivery/Fuel Injection Type; variable ID: 67; group: Engine; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_FuelTankMaterial` | `TEXT` | NHTSA variable `FuelTankMaterial`; label: Fuel-Tank Material; variable ID: 201; group: Exterior/Motorcycle; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_FuelTankType` | `TEXT` | NHTSA variable `FuelTankType`; label: Fuel-Tank Type; variable ID: 200; group: Exterior/Motorcycle; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_FuelTypePrimary` | `TEXT` | NHTSA variable `FuelTypePrimary`; label: Fuel Type - Primary; variable ID: 24; group: Engine; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 4 | ``<br>`Not Applicable`<br>`Diesel`<br>`Gasoline` |
+| `vpic_FuelTypeSecondary` | `TEXT` | NHTSA variable `FuelTypeSecondary`; label: Fuel Type - Secondary; variable ID: 66; group: Engine; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Electric` |
+| `vpic_GCWR` | `TEXT` | NHTSA variable `GCWR`; label: Gross Combination Weight Rating From; variable ID: 184; group: Exterior/Dimension; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_GCWR_to` | `TEXT` | NHTSA variable `GCWR_to`; label: Gross Combination Weight Rating To; variable ID: 185; group: Exterior/Dimension; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_GVWR` | `TEXT` | NHTSA variable `GVWR`; label: Gross Vehicle Weight Rating From; variable ID: 25; group: Exterior/Dimension; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Class 3: 10,001 - 14,000 lb (4,536 - 6,350 kg)`<br>`Class 1C: 4,001 - 5,000 lb (1,814 - 2,268 kg)` |
+| `vpic_GVWR_to` | `TEXT` | NHTSA variable `GVWR_to`; label: Gross Vehicle Weight Rating To; variable ID: 190; group: Exterior/Dimension; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Class 1: 6,000 lb or less (2,722 kg or less)`<br>`Class 1C: 4,001 - 5,000 lb (1,814 - 2,268 kg)` |
+| `vpic_KeylessIgnition` | `TEXT` | NHTSA variable `KeylessIgnition`; label: Keyless Ignition; variable ID: 176; group: Active Safety System; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_LaneCenteringAssistance` | `TEXT` | NHTSA variable `LaneCenteringAssistance`; label: Lane Centering Assistance; variable ID: 194; group: Active Safety System/Lane and Side Assist; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_LaneDepartureWarning` | `TEXT` | NHTSA variable `LaneDepartureWarning`; label: Lane Departure Warning (LDW); variable ID: 102; group: Active Safety System/Lane and Side Assist; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_LaneKeepSystem` | `TEXT` | NHTSA variable `LaneKeepSystem`; label: Lane Keeping Assistance (LKA); variable ID: 103; group: Active Safety System/Lane and Side Assist; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_LowerBeamHeadlampLightSource` | `TEXT` | NHTSA variable `LowerBeamHeadlampLightSource`; label: Headlamp Light Source; variable ID: 178; group: Active Safety System/Lighting Technologies; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_Make` | `TEXT` | NHTSA variable `Make`; label: Make; variable ID: 26; group: General; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 5 | ``<br>`EAGER BEAVER`<br>`HUMMER`<br>`CLENET COACHWORKS`<br>`ACURA` |
+| `vpic_MakeID` | `TEXT` | NHTSA variable `MakeID`; label: MakeID; variable ID: not captured; group: not captured; DataType: `not captured` (interpret according to NHTSA variable definition). Stored as TEXT to preserve source output. | 5 | ``<br>`6198`<br>`951`<br>`13024`<br>`475` |
+| `vpic_Manufacturer` | `TEXT` | NHTSA variable `Manufacturer`; label: Manufacturer Name; variable ID: 27; group: General; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 5 | ``<br>`GENERAL ENGINES CO., INC `<br>`AM GENERAL LLC`<br>`CLENET COACHWORKS`<br>`AMERICAN HONDA MOTOR CO., INC.` |
+| `vpic_ManufacturerId` | `TEXT` | NHTSA variable `ManufacturerId`; label: ManufacturerId; variable ID: not captured; group: not captured; DataType: `not captured` (interpret according to NHTSA variable definition). Stored as TEXT to preserve source output. | 5 | ``<br>`15467`<br>`1174`<br>`23457`<br>`988` |
+| `vpic_Model` | `TEXT` | NHTSA variable `Model`; label: Model; variable ID: 28; group: General; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 6 | ``<br>`H1`<br>`Asher Series`<br>`ILX`<br>`NSX` |
+| `vpic_ModelID` | `TEXT` | NHTSA variable `ModelID`; label: ModelID; variable ID: not captured; group: not captured; DataType: `not captured` (interpret according to NHTSA variable definition). Stored as TEXT to preserve source output. | 6 | ``<br>`14474`<br>`34311`<br>`2150`<br>`5168` |
+| `vpic_ModelYear` | `TEXT` | NHTSA variable `ModelYear`; label: Model Year; variable ID: 29; group: General; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 28 | ``<br>`2013`<br>`1995`<br>`2003`<br>`2001` |
+| `vpic_MotorcycleChassisType` | `TEXT` | NHTSA variable `MotorcycleChassisType`; label: Motorcycle Chassis Type; variable ID: 153; group: Exterior/Motorcycle; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_MotorcycleSuspensionType` | `TEXT` | NHTSA variable `MotorcycleSuspensionType`; label: Motorcycle Suspension Type; variable ID: 152; group: Exterior/Motorcycle; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_NCSABodyType` | `TEXT` | NHTSA variable `NCSABodyType`; label: NCSA Body Type; variable ID: 96; group: Internal; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 5 | ``<br>`Single-unit straight truck or Cab-Chassis (GVWR range 10,001 to 19,500 lbs.)`<br>`Convertible(excludes sun-roof,t-bar)`<br>`4-door sedan, hardtop`<br>`2-door sedan,hardtop,coupe` |
+| `vpic_NCSAMake` | `TEXT` | NHTSA variable `NCSAMake`; label: NCSA Make; variable ID: 97; group: Internal; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 4 | ``<br>`AM General`<br>`Other Domestic Manufacturers`<br>`Acura` |
+| `vpic_NCSAMapExcApprovedBy` | `TEXT` | NHTSA variable `NCSAMapExcApprovedBy`; label: NCSAMapExcApprovedBy; variable ID: not captured; group: not captured; DataType: `not captured` (interpret according to NHTSA variable definition). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_NCSAMapExcApprovedOn` | `TEXT` | NHTSA variable `NCSAMapExcApprovedOn`; label: NCSAMapExcApprovedOn; variable ID: not captured; group: not captured; DataType: `not captured` (interpret according to NHTSA variable definition). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_NCSAMappingException` | `TEXT` | NHTSA variable `NCSAMappingException`; label: NCSAMappingException; variable ID: not captured; group: not captured; DataType: `not captured` (interpret according to NHTSA variable definition). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_NCSAModel` | `TEXT` | NHTSA variable `NCSAModel`; label: NCSA Model; variable ID: 98; group: Internal; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 6 | ``<br>`Medium/Heavy Truck`<br>`Other (automobile)`<br>`ILX`<br>`NSX (2016 on.  For 1991-2005 see model 033.)` |
+| `vpic_NCSANote` | `TEXT` | NHTSA variable `NCSANote`; label: NCSA Note; variable ID: 186; group: Internal; DataType: `string` (text value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_NonLandUse` | `TEXT` | NHTSA variable `NonLandUse`; label: Non-Land Use; variable ID: 195; group: General; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_Note` | `TEXT` | NHTSA variable `Note`; label: Note; variable ID: 114; group: General; DataType: `string` (text value). Stored as TEXT to preserve source output. | 6 | ``<br>`0= standard  length  , 2= 2ft 0" longer than standard etc and letters will represent shorter deck length i.…`<br>`ENLARGED CAB`<br>`8" LED Display, Apple CarPlay, Android Auto, HD Radio, SiriusXM Satellite Radio, Bluetooth, USB port`<br>`Curb Weight: 3,803-3,875 lbs` |
+| `vpic_OtherBusInfo` | `TEXT` | NHTSA variable `OtherBusInfo`; label: Other Bus Info; variable ID: 150; group: Exterior/Bus; DataType: `string` (text value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_OtherEngineInfo` | `TEXT` | NHTSA variable `OtherEngineInfo`; label: Other Engine Info; variable ID: 129; group: Engine; DataType: `string` (text value). Stored as TEXT to preserve source output. | 4 | ``<br>`NATURALLY ASPIRATED`<br>`Direct Fuel Injection`<br>`Direct Fuel Injection, Sequential Multiport Fuel Injection` |
+| `vpic_OtherMotorcycleInfo` | `TEXT` | NHTSA variable `OtherMotorcycleInfo`; label: Other Motorcycle Info; variable ID: 154; group: Exterior/Motorcycle; DataType: `string` (text value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_OtherRestraintSystemInfo` | `TEXT` | NHTSA variable `OtherRestraintSystemInfo`; label: Other Restraint System Info; variable ID: 121; group: Passive Safety System; DataType: `string` (text value). Stored as TEXT to preserve source output. | 7 | ``<br>`seat belts: front, rear, rear center`<br>`Seat Belt (Rear)`<br>`Seat Belt ( Rear Center Position)`<br>`seat belts: front, rear and rear center` |
+| `vpic_OtherTrailerInfo` | `TEXT` | NHTSA variable `OtherTrailerInfo`; label: Other Trailer Info; variable ID: 155; group: Exterior/Trailer; DataType: `string` (text value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_ParkAssist` | `TEXT` | NHTSA variable `ParkAssist`; label: Parking Assist; variable ID: 105; group: Active Safety System/Backing Up and Parking; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_PedestrianAutomaticEmergencyBraking` | `TEXT` | NHTSA variable `PedestrianAutomaticEmergencyBraking`; label: Pedestrian Automatic Emergency Braking (PAEB); variable ID: 171; group: Active Safety System/Forward Collision Prevention; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_PlantCity` | `TEXT` | NHTSA variable `PlantCity`; label: Plant City; variable ID: 31; group: General; DataType: `string` (text value). Stored as TEXT to preserve source output. | 5 | ``<br>`MISHAWAKA`<br>`CARPINTERIA`<br>`MARYSVILLE`<br>`SUZUKA` |
+| `vpic_PlantCompanyName` | `TEXT` | NHTSA variable `PlantCompanyName`; label: Plant Company Name; variable ID: 76; group: General; DataType: `string` (text value). Stored as TEXT to preserve source output. | 2 | ``<br>`PMC` |
+| `vpic_PlantCountry` | `TEXT` | NHTSA variable `PlantCountry`; label: Plant Country; variable ID: 75; group: General; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`UNITED STATES (USA)`<br>`JAPAN` |
+| `vpic_PlantState` | `TEXT` | NHTSA variable `PlantState`; label: Plant State; variable ID: 77; group: General; DataType: `string` (text value). Stored as TEXT to preserve source output. | 5 | ``<br>`INDIANA`<br>`CALIFORNIA`<br>`OHIO`<br>`MIE` |
+| `vpic_PossibleValues` | `TEXT` | NHTSA variable `PossibleValues`; label: Possible Values; variable ID: 144; group: not captured; DataType: `string` (text value). Stored as TEXT to preserve source output. | 2 | ``<br>`(5:0ABDGHLOSTX)(7:0123456789)(11:AST)` |
+| `vpic_Pretensioner` | `TEXT` | NHTSA variable `Pretensioner`; label: Pretensioner; variable ID: 78; group: Passive Safety System; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_RearAutomaticEmergencyBraking` | `TEXT` | NHTSA variable `RearAutomaticEmergencyBraking`; label: Rear Automatic Emergency Braking; variable ID: 192; group: Active Safety System/Backing Up and Parking; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_RearCrossTrafficAlert` | `TEXT` | NHTSA variable `RearCrossTrafficAlert`; label: Rear Cross Traffic Alert; variable ID: 183; group: Active Safety System/Backing Up and Parking; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_RearVisibilitySystem` | `TEXT` | NHTSA variable `RearVisibilitySystem`; label: Backup Camera; variable ID: 104; group: Active Safety System/Backing Up and Parking; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_SAEAutomationLevel` | `TEXT` | NHTSA variable `SAEAutomationLevel`; label: SAE Automation Level From; variable ID: 181; group: Active Safety System; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_SAEAutomationLevel_to` | `TEXT` | NHTSA variable `SAEAutomationLevel_to`; label: SAE Automation Level To; variable ID: 182; group: Active Safety System; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_SeatBeltsAll` | `TEXT` | NHTSA variable `SeatBeltsAll`; label: Seat Belt Type; variable ID: 79; group: Passive Safety System; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Manual` |
+| `vpic_SeatRows` | `TEXT` | NHTSA variable `SeatRows`; label: Number of Seat Rows; variable ID: 61; group: Interior/Seat; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 3 | ``<br>`2`<br>`1` |
+| `vpic_Seats` | `TEXT` | NHTSA variable `Seats`; label: Number of Seats; variable ID: 33; group: Interior/Seat; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 4 | ``<br>`4`<br>`5`<br>`2` |
+| `vpic_SemiautomaticHeadlampBeamSwitching` | `TEXT` | NHTSA variable `SemiautomaticHeadlampBeamSwitching`; label: Semiautomatic Headlamp Beam Switching; variable ID: 179; group: Active Safety System/Lighting Technologies; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_Series` | `TEXT` | NHTSA variable `Series`; label: Series; variable ID: 34; group: General; DataType: `string` (text value). Stored as TEXT to preserve source output. | 5 | ``<br>`1 1/4 ton`<br>`1 1/4 ton HMCS`<br>`1 1/4 ton K-SERIES`<br>`1 1/4 ton OPEN BODY W/FULL HARD DOORS` |
+| `vpic_Series2` | `TEXT` | NHTSA variable `Series2`; label: Series2; variable ID: 110; group: General; DataType: `string` (text value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_SteeringLocation` | `TEXT` | NHTSA variable `SteeringLocation`; label: Steering Location; variable ID: 36; group: Interior; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Left-Hand Drive (LHD)` |
+| `vpic_SuggestedVIN` | `TEXT` | NHTSA variable `SuggestedVIN`; label: Suggested VIN; variable ID: 142; group: not captured; DataType: `string` (text value). Stored as TEXT to preserve source output. | 24 | `00000000!C8029986`<br>`00000000!13093550`<br>`00000000!13162056`<br>`0000000B!40050274`<br>`0000000F!40367520` |
+| `vpic_TPMS` | `TEXT` | NHTSA variable `TPMS`; label: Tire Pressure Monitoring System (TPMS) Type; variable ID: 168; group: Active Safety System; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Direct` |
+| `vpic_TopSpeedMPH` | `TEXT` | NHTSA variable `TopSpeedMPH`; label: Top Speed (MPH); variable ID: 139; group: Engine; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_TrackWidth` | `TEXT` | NHTSA variable `TrackWidth`; label: Track Width (inches); variable ID: 159; group: Exterior/Body; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_TractionControl` | `TEXT` | NHTSA variable `TractionControl`; label: Traction Control; variable ID: 100; group: Active Safety System; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Standard` |
+| `vpic_TrailerBodyType` | `TEXT` | NHTSA variable `TrailerBodyType`; label: Trailer Body Type; variable ID: 117; group: Exterior/Trailer; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_TrailerLength` | `TEXT` | NHTSA variable `TrailerLength`; label: Trailer Length (feet); variable ID: 118; group: Exterior/Trailer; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_TrailerType` | `TEXT` | NHTSA variable `TrailerType`; label: Trailer Type Connection; variable ID: 116; group: Exterior/Trailer; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 2 | ``<br>`Not Applicable` |
+| `vpic_TransmissionSpeeds` | `TEXT` | NHTSA variable `TransmissionSpeeds`; label: Transmission Speeds; variable ID: 63; group: Mechanical/Transmission; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 7 | ``<br>`4`<br>`5`<br>`3`<br>`8` |
+| `vpic_TransmissionStyle` | `TEXT` | NHTSA variable `TransmissionStyle`; label: Transmission Style; variable ID: 37; group: Mechanical/Transmission; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 5 | ``<br>`Not Applicable`<br>`Automatic`<br>`Dual-Clutch Transmission (DCT)`<br>`Manual/Standard` |
+| `vpic_Trim` | `TEXT` | NHTSA variable `Trim`; label: Trim; variable ID: 38; group: General; DataType: `string` (text value). Stored as TEXT to preserve source output. | 17 | ``<br>`Base/Acura Watch Plus`<br>`ILX`<br>`Special Edition`<br>`Premium/Tech` |
+| `vpic_Trim2` | `TEXT` | NHTSA variable `Trim2`; label: Trim2; variable ID: 109; group: General; DataType: `string` (text value). Stored as TEXT to preserve source output. | 3 | ``<br>`NAVI`<br>`w/ NAVI` |
+| `vpic_Turbo` | `TEXT` | NHTSA variable `Turbo`; label: Turbo; variable ID: 135; group: Engine; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 3 | ``<br>`Not Applicable`<br>`Yes` |
+| `vpic_VIN` | `TEXT` | NHTSA variable `VIN`; label: VIN; variable ID: not captured; group: not captured; DataType: `not captured` (interpret according to NHTSA variable definition). Stored as TEXT to preserve source output. | 3,427 | `00000000GC8029986`<br>`00000000S13093550`<br>`00000000S13162056`<br>`0000000BJ40050274`<br>`0000000FJ40367520` |
+| `vpic_ValveTrainDesign` | `TEXT` | NHTSA variable `ValveTrainDesign`; label: Valve Train Design; variable ID: 62; group: Engine; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 4 | ``<br>`Not Applicable`<br>`Dual Overhead Cam (DOHC)`<br>`Single Overhead Cam (SOHC)` |
+| `vpic_VehicleDescriptor` | `TEXT` | NHTSA variable `VehicleDescriptor`; label: Vehicle Descriptor; variable ID: 196; group: not captured; DataType: `string` (text value). Stored as TEXT to preserve source output. | 114 | `00000000*C8`<br>`00000000*13`<br>`0000000B*40`<br>`0000000F*40`<br>`0000000H*33` |
+| `vpic_VehicleType` | `TEXT` | NHTSA variable `VehicleType`; label: Vehicle Type; variable ID: 39; group: General; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 4 | ``<br>`TRAILER`<br>`MULTIPURPOSE PASSENGER VEHICLE (MPV)`<br>`PASSENGER CAR` |
+| `vpic_WheelBaseLong` | `TEXT` | NHTSA variable `WheelBaseLong`; label: Wheelbase (inches) To; variable ID: 112; group: Exterior/Dimension; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_WheelBaseShort` | `TEXT` | NHTSA variable `WheelBaseShort`; label: Wheelbase (inches) From; variable ID: 111; group: Exterior/Dimension; DataType: `decimal` (decimal numeric value). Stored as TEXT to preserve source output. | 2 | ``<br>`105.10` |
+| `vpic_WheelBaseType` | `TEXT` | NHTSA variable `WheelBaseType`; label: Wheelbase Type; variable ID: 60; group: Exterior/Body; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_WheelSizeFront` | `TEXT` | NHTSA variable `WheelSizeFront`; label: Wheel Size Front (inches); variable ID: 119; group: Exterior/Wheel Tire; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_WheelSizeRear` | `TEXT` | NHTSA variable `WheelSizeRear`; label: Wheel Size Rear (inches); variable ID: 120; group: Exterior/Wheel Tire; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_WheelieMitigation` | `TEXT` | NHTSA variable `WheelieMitigation`; label: Wheelie Mitigation; variable ID: 203; group: Exterior/Motorcycle; DataType: `lookup` (coded/category value; consult the accepted-value list). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_Wheels` | `TEXT` | NHTSA variable `Wheels`; label: Number of Wheels; variable ID: 115; group: Exterior/Wheel Tire; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 2 | ``<br>`4` |
+| `vpic_Windows` | `TEXT` | NHTSA variable `Windows`; label: Windows; variable ID: 40; group: Exterior/Body; DataType: `int` (integer numeric value). Stored as TEXT to preserve source output. | 1 | `` |
+| `vpic_CleanDecode` | `TEXT` | NHTSA variable `CleanDecode`; label: CleanDecode; variable ID: not captured; group: not captured; DataType: `not captured` (interpret according to NHTSA variable definition). Stored as TEXT to preserve source output. | 1 | `False` |
+
+## `used_cars`
+
+Listing records imported from DATA/used_cars_data.csv; one row per source listing identifier.
+
+SQLite retains source columns as TEXT. Cleaned types describe the in-memory output of `EDA/DATA_CLEANING.py`: FLOAT is Polars Float64, INT is Int64, and DATE is Date. Measurement suffixes and surrounding whitespace are removed before parsing. Empty or invalid values (including `--`) become NULL. Integer-valued decimal strings such as `3.0` become `3`; fractional counts become NULL. Integer dealer ZIP codes lose leading zeros. Counts and examples below describe the raw database snapshot.
+
+| Column | SQLite type / cleaned type | Definition / interpretation | Distinct non-NULL values | Five distinct examples (when available) |
+|---|---|---|---:|---|
+| `vin` | `TEXT` | VIN supplied by the listing or echoed by the decoder; identifier text. | Not profiled (large table) | `0`<br>`00000000011111111`<br>`00000000011615922`<br>`00000000012631735`<br>`00000000012646077` |
+| `back_legroom` | `TEXT` / `FLOAT` | Rear-seat legroom measured in inches. | Not profiled (large table) | `35.1 in`<br>`38.1 in`<br>`35.4 in`<br>`37.6 in`<br>`37.1 in` |
+| `bed` | `TEXT` | Source-provided `bed` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | ``<br>`Short`<br>`Long`<br>`Regular` |
+| `bed_height` | `TEXT` | Source-provided `bed_height` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | ``<br>`--` |
+| `bed_length` | `TEXT` / `FLOAT` | Truck bed length measured in inches. | Not profiled (large table) | ``<br>`78.9 in`<br>`--`<br>`81.9 in`<br>`74 in` |
+| `body_type` | `TEXT` | Source-provided `body_type` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `SUV / Crossover`<br>`Sedan`<br>`Coupe`<br>`Hatchback`<br>`Pickup Truck` |
+| `cabin` | `TEXT` | Source-provided `cabin` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | ``<br>`Crew Cab`<br>`Extended Cab`<br>`Regular Cab`<br>`Large Crew Cab` |
+| `city` | `TEXT` | Source-provided `city` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `Bayamon`<br>`San Juan`<br>`Guaynabo`<br>`Bay Shore`<br>`Bronx` |
+| `city_fuel_economy` | `TEXT` / `FLOAT` | City fuel economy measured in miles per gallon (mpg). | Not profiled (large table) | ``<br>`17.0`<br>`22.0`<br>`27.0`<br>`18.0` |
+| `combine_fuel_economy` | `TEXT` / `FLOAT` | Combined city/highway fuel economy measured in miles per gallon (mpg); source column spelling is retained. | Not profiled (large table) | `` |
+| `daysonmarket` | `TEXT` / `INT` | Number of days the listing has been on the market. | Not profiled (large table) | `522`<br>`207`<br>`1233`<br>`196`<br>`137` |
+| `dealer_zip` | `TEXT` / `INT` | Dealer ZIP code converted to an integer; leading zeros are removed. | Not profiled (large table) | `00960`<br>`00922`<br>`00969`<br>`11706`<br>`10466` |
+| `description` | `TEXT` | NHTSA variable description when captured. | Not profiled (large table) | `[!@@Additional Info@@!]Engine: 2.4L I4 ZERO EVAP M-AIR,Full Size Temporary Use Spare Tire,Manufacturer's St…`<br>`[!@@Additional Info@@!]Keyless Entry,Ebony Morzine Headliner,Chrome Wheel Protection Pack,Powered Tailgate,…`<br>``<br>`[!@@Additional Info@@!]Fog Lights,7 Seat Package,Wheels: 21' 9 Spoke,GVWR: 6,900 lbs,Full Length Black Roof…`<br>`[!@@Additional Info@@!]Keyless Entry,Ebony Morzine Headliner,Chrome Wheel Protection Pack,ClearSight Rearvi…` |
+| `engine_cylinders` | `TEXT` | Source-provided `engine_cylinders` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `I4`<br>`H4`<br>`V6`<br>`I6`<br>`V6 Diesel` |
+| `engine_displacement` | `TEXT` / `FLOAT` | Source-provided engine displacement parsed as a floating-point number. | Not profiled (large table) | `1300.0`<br>`2000.0`<br>`2500.0`<br>`3000.0`<br>`1700.0` |
+| `engine_type` | `TEXT` | Source-provided `engine_type` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `I4`<br>`H4`<br>`V6`<br>`I6`<br>`V6 Diesel` |
+| `exterior_color` | `TEXT` | Source-provided `exterior_color` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `Solar Yellow`<br>`Narvik Black`<br>`None`<br>`Eiger Gray`<br>`Kaikoura Stone` |
+| `fleet` | `TEXT` | Source-provided `fleet` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | ``<br>`False`<br>`True` |
+| `frame_damaged` | `TEXT` | Source-provided `frame_damaged` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | ``<br>`False`<br>`True` |
+| `franchise_dealer` | `TEXT` | Source-provided `franchise_dealer` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `True`<br>`False` |
+| `franchise_make` | `TEXT` | Source-provided `franchise_make` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `Jeep`<br>`Land Rover`<br>`FIAT`<br>`Chevrolet`<br>`Cadillac` |
+| `front_legroom` | `TEXT` / `FLOAT` | Front-seat legroom measured in inches. | Not profiled (large table) | `41.2 in`<br>`39.1 in`<br>`43.3 in`<br>`39 in`<br>`40.2 in` |
+| `fuel_tank_volume` | `TEXT` / `FLOAT` | Fuel tank capacity measured in gallons. | Not profiled (large table) | `12.7 gal`<br>`17.7 gal`<br>`15.9 gal`<br>`23.5 gal`<br>`16.6 gal` |
+| `fuel_type` | `TEXT` | Source-provided `fuel_type` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `Gasoline`<br>`Diesel`<br>``<br>`Biodiesel`<br>`Flex Fuel Vehicle` |
+| `has_accidents` | `TEXT` | Source-provided `has_accidents` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | ``<br>`False`<br>`True` |
+| `height` | `TEXT` / `FLOAT` | Vehicle height in inches, measured from the ground to the highest point at the top of the car. | Not profiled (large table) | `66.5 in`<br>`68 in`<br>`58.1 in`<br>`73 in`<br>`66.3 in` |
+| `highway_fuel_economy` | `TEXT` / `FLOAT` | Highway fuel economy measured in miles per gallon (mpg). | Not profiled (large table) | ``<br>`23.0`<br>`33.0`<br>`36.0`<br>`24.0` |
+| `horsepower` | `TEXT` / `FLOAT` | Engine horsepower parsed as a floating-point number. | Not profiled (large table) | `177.0`<br>`246.0`<br>`305.0`<br>`340.0`<br>`247.0` |
+| `interior_color` | `TEXT` | Source-provided `interior_color` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `Black`<br>`Black (Ebony)`<br>`None`<br>`Gray (Ebony/Ebony/Ebony)`<br>`Brown (Ebony / Ebony)` |
+| `isCab` | `TEXT` | Source-provided `isCab` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | ``<br>`False`<br>`True` |
+| `is_certified` | `TEXT` | Source-provided `is_certified` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `` |
+| `is_cpo` | `TEXT` | Source-provided `is_cpo` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | ``<br>`True` |
+| `is_new` | `TEXT` | Source-provided `is_new` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `True`<br>`False` |
+| `is_oemcpo` | `TEXT` | Source-provided `is_oemcpo` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | ``<br>`True` |
+| `latitude` | `TEXT` / `FLOAT` | Listing location latitude in decimal degrees. | Not profiled (large table) | `18.3988`<br>`18.4439`<br>`18.3467`<br>`40.7333`<br>`40.8847` |
+| `length` | `TEXT` / `FLOAT` | Total length of the vehicle measured in inches. | Not profiled (large table) | `166.6 in`<br>`181 in`<br>`180.9 in`<br>`195.1 in`<br>`188.9 in` |
+| `listed_date` | `TEXT` / `DATE` | Date the vehicle was listed, parsed from YYYY-MM-DD. | Not profiled (large table) | `2019-04-06`<br>`2020-02-15`<br>`2017-04-25`<br>`2020-02-26`<br>`2020-04-25` |
+| `listing_color` | `TEXT` | Source-provided `listing_color` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `YELLOW`<br>`BLACK`<br>`UNKNOWN`<br>`GRAY`<br>`SILVER` |
+| `listing_id` | `TEXT` | Source-provided `listing_id` value from `used_cars`; exact meaning follows the upstream field definition. Primary-key position 1. | Not profiled (large table) | `100351565`<br>`100351617`<br>`100351622`<br>`100351643`<br>`100351655` |
+| `longitude` | `TEXT` / `FLOAT` | Listing location longitude in decimal degrees. | Not profiled (large table) | `-66.1582`<br>`-66.0785`<br>`-66.1098`<br>`-73.2587`<br>`-73.8317` |
+| `main_picture_url` | `TEXT` | Source-provided `main_picture_url` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `https://static.cargurus.com/images/forsale/2020/05/18/18/53/2019_jeep_renegade-pic-3296019950109819645-152x…`<br>`https://static.cargurus.com/images/forsale/2020/05/15/18/25/2020_land_rover_discovery_sport-pic-38548303679…`<br>``<br>`https://static.cargurus.com/images/forsale/2020/05/18/20/55/2020_land_rover_discovery-pic-35711042535519475…`<br>`https://static.cargurus.com/images/forsale/2020/07/19/01/27/2020_land_rover_discovery_sport-pic-28597220894…` |
+| `major_options` | `TEXT` | Source-provided `major_options` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `['Quick Order Package']`<br>`['Adaptive Cruise Control']`<br>`['Alloy Wheels', 'Bluetooth', 'Backup Camera', 'Heated Seats']`<br>``<br>`['Leather Seats', 'Sunroof/Moonroof', 'Navigation System', 'Adaptive Cruise Control', 'Alloy Wheels', 'Blue…` |
+| `make_name` | `TEXT` | Source-provided `make_name` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `Ford`<br>`Franklin`<br>`Chevrolet`<br>`Mercedes-Benz`<br>`Bentley` |
+| `maximum_seating` | `TEXT` / `INT` | Maximum number of seats; the seats suffix is removed. | Not profiled (large table) | `5 seats`<br>`7 seats`<br>`2 seats`<br>`4 seats`<br>`8 seats` |
+| `mileage` | `TEXT` / `FLOAT` | Source-provided vehicle mileage parsed as a floating-point number. | Not profiled (large table) | `7.0`<br>`8.0`<br>``<br>`11.0`<br>`12.0` |
+| `model_name` | `TEXT` | Source-provided `model_name` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `Model T`<br>`AT`<br>`Superior`<br>`Model A`<br>`Confederate` |
+| `owner_count` | `TEXT` / `INT` | Number of previous owners, parsed as an integer (for example, 3.0 becomes 3). | Not profiled (large table) | ``<br>`3.0`<br>`2.0`<br>`1.0`<br>`4.0` |
+| `power` | `TEXT` | Source-provided `power` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `177 hp @ 5,750 RPM`<br>`246 hp @ 5,500 RPM`<br>`305 hp @ 6,000 RPM`<br>`340 hp @ 6,500 RPM`<br>`247 hp @ 5,500 RPM` |
+| `price` | `TEXT` / `FLOAT` | Listing price parsed as a floating-point number. | Not profiled (large table) | `23141.0`<br>`46500.0`<br>`46995.0`<br>`67430.0`<br>`48880.0` |
+| `salvage` | `TEXT` | Source-provided `salvage` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | ``<br>`False`<br>`True` |
+| `savings_amount` | `TEXT` / `INT` | Source-provided savings amount parsed as an integer. | Not profiled (large table) | `0`<br>`2709`<br>`1749`<br>`1861`<br>`3500` |
+| `seller_rating` | `TEXT` / `FLOAT` | Seller rating parsed as a floating-point number. | Not profiled (large table) | `2.8`<br>`3.0`<br>``<br>`3.4477611940298507`<br>`2.963636363636364` |
+| `sp_id` | `TEXT` | Source-provided `sp_id` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `370599`<br>`389227`<br>`370467`<br>`314501`<br>`62178` |
+| `sp_name` | `TEXT` | Source-provided `sp_name` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `Flagship Chrysler`<br>`Land Rover San Juan`<br>`FIAT de San Juan`<br>`Atlantic Chevrolet Cadillac`<br>`Eastchester Chrysler Jeep Dodge Ram` |
+| `theft_title` | `TEXT` | Source-provided `theft_title` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | ``<br>`False`<br>`True` |
+| `torque` | `TEXT` | Source-provided `torque` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `200 lb-ft @ 1,750 RPM`<br>`269 lb-ft @ 1,400 RPM`<br>`290 lb-ft @ 4,000 RPM`<br>`332 lb-ft @ 3,500 RPM`<br>`269 lb-ft @ 1,200 RPM` |
+| `transmission` | `TEXT` | Source-provided `transmission` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `A`<br>`M`<br>`CVT`<br>``<br>`Dual Clutch` |
+| `transmission_display` | `TEXT` | Source-provided `transmission_display` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `9-Speed Automatic Overdrive`<br>`6-Speed Manual`<br>`8-Speed Automatic Overdrive`<br>`6-Speed Automatic Overdrive`<br>`6-Speed Automatic` |
+| `trimId` | `TEXT` | Source-provided `trimId` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `t83804`<br>`t86759`<br>`t58994`<br>`t86074`<br>`t85614` |
+| `trim_name` | `TEXT` | Source-provided `trim_name` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `Latitude FWD`<br>`S AWD`<br>`Base`<br>`V6 HSE AWD`<br>`P250 R-Dynamic S AWD` |
+| `vehicle_damage_category` | `TEXT` | Source-provided `vehicle_damage_category` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `` |
+| `wheel_system` | `TEXT` | Source-provided `wheel_system` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `FWD`<br>`AWD`<br>`RWD`<br>`4WD`<br>`` |
+| `wheel_system_display` | `TEXT` | Source-provided `wheel_system_display` value from `used_cars`; exact meaning follows the upstream field definition. | Not profiled (large table) | `Front-Wheel Drive`<br>`All-Wheel Drive`<br>`Rear-Wheel Drive`<br>`Four-Wheel Drive`<br>`` |
+| `wheelbase` | `TEXT` / `FLOAT` | Distance between the front and rear axles measured in inches. | Not profiled (large table) | `101.2 in`<br>`107.9 in`<br>`104.3 in`<br>`115 in`<br>`113.1 in` |
+| `width` | `TEXT` / `FLOAT` | Vehicle width measured in inches. | Not profiled (large table) | `79.6 in`<br>`85.6 in`<br>`78.9 in`<br>`87.4 in`<br>`84.4 in` |
+| `year` | `TEXT` / `INT` | Vehicle model year parsed as an integer. | Not profiled (large table) | `1915`<br>`1921`<br>`1923`<br>`1924`<br>`1925` |
+
+## Sources and maintenance
+
+- `NHTSA/build_car_data_db.py`: listing ingestion, NHTSA API enrichment, local vPIC decoding, and persistence.
+- NHTSA vPIC standalone database and decoder documentation: https://vpic.nhtsa.dot.gov/Downloads
+- Refresh this dictionary after materially changing `DATA/CAR_DATA.db`; counts and examples describe this snapshot.

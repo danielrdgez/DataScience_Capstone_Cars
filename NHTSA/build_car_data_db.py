@@ -2,7 +2,7 @@
 
 The listing CSV is streamed in batches. Vehicle-level NHTSA endpoints are
 queried once per distinct (year, make_name, model_name); VIN decode values are
-queried locally in vPIC SQL Server batches of up to 100 VINs. Listings are only
+queried locally in vPIC SQL Server chunks of up to 100 VINs. Listings are only
 loaded when --load-listings is specified, so query-only runs do not overwrite
 or replace source listing rows.
 """
@@ -125,6 +125,89 @@ def create_schema(conn: sqlite3.Connection) -> None:
         UNIQUE(query_type, model_year, make, model, vin)
     );
     """)
+    create_vpic_wide_tables(conn)
+
+
+def vpic_column_name(variable_code: str) -> str:
+    """Return a stable physical column name for a vPIC variable code."""
+    slug = re.sub(r"[^A-Za-z0-9_]", "_", variable_code)
+    return "vpic_" + (slug or "unnamed")
+
+
+def create_vpic_wide_tables(conn: sqlite3.Connection) -> None:
+    """Create the wide per-VIN table and pivot previously collected long values once."""
+    wide_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nhtsa_vpic_decodes'"
+    ).fetchone() is not None
+    conn.execute("""CREATE TABLE IF NOT EXISTS nhtsa_vpic_decodes (
+        vin TEXT NOT NULL, model_year_hint INTEGER, fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(vin, model_year_hint)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS nhtsa_vpic_variable_metadata (
+        variable_code TEXT PRIMARY KEY, column_name TEXT NOT NULL UNIQUE,
+        variable_id TEXT, variable_label TEXT, group_name TEXT, data_type TEXT,
+        description TEXT
+    )""")
+    if wide_exists:
+        return
+
+    # Preserve earlier API/long-form decodes in wide form. New local decodes
+    # then replace these rows with the detailed standalone SQL output.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='nhtsa_vpic_values'").fetchone():
+        legacy_names = [r[0] for r in conn.execute(
+            "SELECT DISTINCT variable_name FROM nhtsa_vpic_values WHERE variable_name IS NOT NULL")]
+        legacy_vars = [{"variable_name": str(code), "variable_id": None,
+                        "variable_label": str(code), "group_name": None, "data_type": None}
+                       for code in legacy_names]
+        column_by_code = ensure_vpic_feature_columns(conn, legacy_vars)
+        if legacy_names:
+            pivot: dict[tuple[str, int | None], dict[str, str | None]] = {}
+            for vin, year, code, value in conn.execute(
+                "SELECT vin,model_year_hint,variable_name,value FROM nhtsa_vpic_values"):
+                pivot.setdefault((str(vin), year), {})[column_by_code[str(code)]] = value
+            columns = [r[1] for r in conn.execute("PRAGMA table_info(nhtsa_vpic_decodes)")
+                       if r[1].startswith("vpic_")]
+            insert_columns = ["vin", "model_year_hint", *columns]
+            quoted = ",".join('"' + col.replace('"', '""') + '"' for col in insert_columns)
+            placeholders = ",".join("?" for _ in insert_columns)
+            conn.executemany(
+                f"INSERT OR REPLACE INTO nhtsa_vpic_decodes ({quoted}) VALUES ({placeholders})",
+                [(vin, year, *(values.get(col) for col in columns))
+                 for (vin, year), values in pivot.items()])
+    conn.commit()
+
+
+def ensure_vpic_feature_columns(conn: sqlite3.Connection,
+                                variables: list[dict[str, Any]]) -> dict[str, str]:
+    """Register metadata and add one TEXT column for each new decoded property."""
+    registered = {row[0]: row[1] for row in conn.execute(
+        "SELECT variable_code,column_name FROM nhtsa_vpic_variable_metadata")}
+    existing_columns = {row[1].casefold() for row in conn.execute("PRAGMA table_info(nhtsa_vpic_decodes)")}
+    result: dict[str, str] = {}
+    for variable in variables:
+        code = str(variable["variable_name"])
+        column = registered.get(code)
+        if column is None:
+            base = vpic_column_name(code)
+            column = base
+            variable_id = variable.get("variable_id")
+            if column.casefold() in existing_columns:
+                column = f"{base}_{variable_id or len(registered) + 1}"
+            while column.casefold() in existing_columns:
+                column += "_"
+            quoted = '"' + column.replace('"', '""') + '"'
+            conn.execute(f"ALTER TABLE nhtsa_vpic_decodes ADD COLUMN {quoted} TEXT")
+            existing_columns.add(column.casefold())
+        conn.execute("""INSERT INTO nhtsa_vpic_variable_metadata
+            (variable_code,column_name,variable_id,variable_label,group_name,data_type)
+            VALUES(?,?,?,?,?,?) ON CONFLICT(variable_code) DO UPDATE SET
+            column_name=excluded.column_name,variable_id=excluded.variable_id,
+            variable_label=excluded.variable_label,group_name=excluded.group_name,
+            data_type=excluded.data_type""",
+            (code, column, variable.get("variable_id"), variable.get("variable_label"),
+             variable.get("group_name"), variable.get("data_type")))
+        result[code] = column
+    return result
 
 
 def load_listings(conn: sqlite3.Connection, csv_path: Path, limit: int | None, batch_size: int) -> int:
@@ -263,7 +346,7 @@ def connect_vpic(server: str, database: str, driver: str):
 
 def fetch_vpic(conn: sqlite3.Connection, server: str, database: str, driver: str,
                batch_size: int = VPIC_BATCH_LIMIT, limit: int | None = None) -> None:
-    """Decode distinct VINs with the locally restored vPIC SQL Server database."""
+    """Decode distinct VINs locally and store every returned variable in wide form."""
     if not 1 <= batch_size <= VPIC_BATCH_LIMIT:
         raise ValueError(f"vPIC batch size must be between 1 and {VPIC_BATCH_LIMIT}")
     mssql = connect_vpic(server, database, driver)
@@ -290,55 +373,109 @@ def fetch_vpic(conn: sqlite3.Connection, server: str, database: str, driver: str
                     batch.append((vin, year))
 
             try:
-                decoded: dict[str, list[tuple[str, str | None]]] = {
-                    vin.casefold(): [] for vin, _ in batch
-                }
-                decoded_keys = set(decoded)
-                if batch:
-                    placeholders = ",".join("(?)" for _ in batch)
-                    sql = ("SET NOCOUNT ON; DECLARE @VinList dbo.tblVinList; "
-                           f"INSERT INTO @VinList (Vin) VALUES {placeholders}; "
-                           "EXEC dbo.spVinDecodeMultiple @VinList;")
-                    cursor = mssql.cursor()
-                    cursor.execute(sql, *(vin for vin, _ in batch))
-                    result_columns: list[str] | None = None
-                    while True:
-                        if cursor.description:
-                            columns = [column[0] for column in cursor.description]
-                            normalized = {re.sub(r"[^a-z0-9]", "", name.casefold()): i
-                                          for i, name in enumerate(columns)}
-                            vin_col = normalized.get("vin")
-                            name_col = normalized.get("variable", normalized.get("variablename"))
-                            value_col = normalized.get("value")
-                            if vin_col is not None and name_col is not None and value_col is not None:
-                                result_columns = columns
-                                for row in cursor.fetchall():
-                                    source_vin = str(row[vin_col])
-                                    key = source_vin.casefold()
-                                    if key in decoded_keys:
-                                        variable = str(row[name_col])
-                                        value = None if row[value_col] is None else str(row[value_col])
-                                        decoded[key].append((variable, value))
-                        if not cursor.nextset():
-                            break
-                    if result_columns is None:
-                        raise RuntimeError(
-                            "spVinDecodeMultiple returned no result set with VIN, Variable, and Value columns; "
-                            "check that the restored vPIC database is the expected NHTSA release."
-                        )
+                decoded: dict[str, list[dict[str, Any]]] = {}
+                decode_errors: dict[str, str] = {}
+                for vin, year in batch:
+                    key = vin.casefold()
+                    decoded[key] = []
+                    try:
+                        # spVinDecodeMultiple only returns summary columns. Calling
+                        # spVinDecode with IncludePrivate=1 and IncludeAll=1 returns
+                        # the complete variable/value rows, including empty variables.
+                        cursor = mssql.cursor()
+                        cursor.execute(
+                            # EXEC arguments cannot contain CAST expressions; bind
+                            # the Python integer/None directly to the Year parameter.
+                            "SET NOCOUNT ON; EXEC dbo.spVinDecode ?, 1, ?, 1, 0;",
+                            vin, year)
+                        got_variable_set = False
+                        while True:
+                            if cursor.description:
+                                columns = [column[0] for column in cursor.description]
+                                normalized = {re.sub(r"[^a-z0-9]", "", name.casefold()): i
+                                              for i, name in enumerate(columns)}
+                                label_col = normalized.get("variable")
+                                value_col = normalized.get("value")
+                                if label_col is not None and value_col is not None:
+                                    got_variable_set = True
+                                    for row in cursor.fetchall():
+                                        label = row[label_col]
+                                        code_col = normalized.get("code")
+                                        code = row[code_col] if code_col is not None else None
+                                        qcd_col = normalized.get("tobeqcd")
+                                        qcd = row[qcd_col] if qcd_col is not None else None
+                                        element_col = normalized.get("elementid")
+                                        element_id = row[element_col] if element_col is not None else None
+                                        variable_id = (element_id if element_id is not None else
+                                                       code if code is not None else label)
+                                        if variable_id is None:
+                                            continue
+                                        output_row = {
+                                            columns[i]: (None if row[i] is None else str(row[i]))
+                                            for i in range(len(columns))
+                                        }
+                                        name = code if code not in (None, "") else qcd
+                                        if name in (None, ""):
+                                            name = label
+                                        value = row[value_col]
+                                        decoded[key].append({
+                                            "variable_id": str(variable_id),
+                                            "variable_name": str(name),
+                                            "value": None if value is None else str(value),
+                                            "variable_label": None if label is None else str(label),
+                                            "group_name": output_row.get("GroupName"),
+                                            "value_id": output_row.get("AttributeId"),
+                                            "pattern_id": output_row.get("PatternId"),
+                                            "vin_schema_id": output_row.get("VinSchemaId"),
+                                            "variable_keys": output_row.get("Keys"),
+                                            "element_id": output_row.get("ElementId"),
+                                            "attribute_id": output_row.get("AttributeId"),
+                                            "created_on": output_row.get("CreatedOn"),
+                                            "wmi_id": output_row.get("WmiId"),
+                                            "data_type": output_row.get("DataType"),
+                                            "decode_method": output_row.get("Decode"),
+                                            "source": output_row.get("Source"),
+                                            "to_be_qcd": output_row.get("ToBeQCd"),
+                                            "source_json": json.dumps(output_row, ensure_ascii=False),
+                                        })
+                            if not cursor.nextset():
+                                break
+                        cursor.close()
+                        if not got_variable_set:
+                            raise RuntimeError(
+                                "spVinDecode returned no result set with Variable and Value columns; "
+                                "check the local vPIC procedure output."
+                            )
+                    except Exception as vin_exc:
+                        decode_errors[key] = str(vin_exc)[:1000]
+                        LOG.error("Local vPIC decode failed for VIN %s: %s", vin, vin_exc)
 
                 for vin, year in invalid:
                     insert_query(conn, "vpic_decode", year, None, None, vin, "invalid_vin")
                 for vin, year in batch:
-                    values = decoded.get(vin.casefold(), [])
-                    qid = insert_query(conn, "vpic_decode", year, None, None, vin,
-                                       "success", 1 if values else 0)
-                    conn.execute("DELETE FROM nhtsa_vpic_values WHERE vin=? AND model_year_hint IS ?",
-                                 (vin, year))
-                    conn.executemany(
-                        "INSERT OR REPLACE INTO nhtsa_vpic_values"
-                        "(vin,model_year_hint,variable_id,variable_name,value) VALUES(?,?,?,?,?)",
-                        [(vin, year, variable, variable, value) for variable, value in values])
+                    key = vin.casefold()
+                    if key in decode_errors:
+                        insert_query(conn, "vpic_decode", year, None, None, vin,
+                                     "error", error=decode_errors[key])
+                        continue
+                    values = decoded[key]
+                    insert_query(conn, "vpic_decode", year, None, None, vin,
+                                 "success", len(values))
+                    columns_by_code = ensure_vpic_feature_columns(conn, values)
+                    all_feature_columns = [row[0] for row in conn.execute(
+                        "SELECT column_name FROM nhtsa_vpic_variable_metadata ORDER BY column_name")]
+                    decoded_values = {
+                        columns_by_code[value["variable_name"]]: value["value"]
+                        for value in values
+                    }
+                    insert_columns = ["vin", "model_year_hint", *all_feature_columns]
+                    quoted_columns = ",".join(
+                        '"' + name.replace('"', '""') + '"' for name in insert_columns)
+                    placeholders = ",".join("?" for _ in insert_columns)
+                    conn.execute(
+                        f"INSERT OR REPLACE INTO nhtsa_vpic_decodes ({quoted_columns}) "
+                        f"VALUES ({placeholders})",
+                        (vin, year, *(decoded_values.get(name) for name in all_feature_columns)))
                 conn.commit()
             except Exception as exc:
                 conn.rollback()
@@ -348,7 +485,7 @@ def fetch_vpic(conn: sqlite3.Connection, server: str, database: str, driver: str
                 for vin, year in invalid:
                     insert_query(conn, "vpic_decode", year, None, None, vin, "invalid_vin")
                 conn.commit()
-                LOG.error("Local vPIC batch failed for %s VINs: %s", len(batch), exc)
+                LOG.error("Local vPIC chunk failed for %s VINs: %s", len(batch), exc)
             processed += len(source_rows)
             total += len(source_rows)
             if total % 10000 == 0 or (limit is not None and processed >= limit):
@@ -375,7 +512,7 @@ def main() -> None:
     parser.add_argument("--vpic-database", default="vPICList_Lite", help="Restored local vPIC database name.")
     parser.add_argument("--vpic-driver", default="ODBC Driver 18 for SQL Server", help="Installed SQL Server ODBC driver name.")
     parser.add_argument("--vpic-batch-size", type=int, default=VPIC_BATCH_LIMIT,
-                        help=f"VINs per local vPIC stored-procedure call (1-{VPIC_BATCH_LIMIT}).")
+                        help=f"VINs per local vPIC transaction chunk (1-{VPIC_BATCH_LIMIT}).")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.limit is not None and args.limit < 1:
