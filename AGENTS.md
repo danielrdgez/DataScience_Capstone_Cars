@@ -15,3 +15,9 @@
 ## Project Notes
 
 This repository supports a data science capstone project about cars. The project will contain datasets, NHTSA-related resources, YouTube-related resources, exploratory data analysis, and machine learning models.
+
+## Cohort Definition
+
+- Whenever the user refers to a vehicle "cohort," interpret it as the combination of `ModelYear`, `Make`, `Model`, and `Trim` from the `NHTSA_vPIC` dataset.
+- Keep cohort dimensions as separate columns in datasets, summaries, and tables. A combined cohort label may be used for chart display only.
+- Link used-car listings to `NHTSA_vPIC` using its lowercase `vin` column when calculating listing price or mileage statistics for cohorts. Never use the capitalized `VIN` decoder-variable column as the join key.

@@ -111,6 +111,15 @@ It reads playlist/video/comment limits and refresh options from command-line fla
 
 ## Exploratory data analysis
 
+After exporting the Parquet snapshot, open `EDA/EDA.ipynb` in Jupyter and run the cells from top to bottom. The notebook provides a compact field guide for all six tables, summarizes EDA practices, profiles `used_cars.price` and `used_cars.mileage` with numeric summary tables, and reports average price and mileage by vehicle cohort (`ModelYear`, `Make`, `Model`, and `Trim`). Cohort dimensions remain separate columns; listings join to the lowercase `vin` field in `NHTSA_vPIC`, not the capitalized `VIN` decoder-variable column. The notebook includes collapsible field-guide tables for all six datasets, EDA principle tables, the existing price/mileage histograms, and cohort average charts. It uses `DATA_DICTIONARY.md` for source definitions and existing field profiles. Install the notebook dependencies with the project requirements before running it.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install jupyterlab ipykernel
+.\.venv\Scripts\python.exe -m jupyter lab EDA\EDA.ipynb
+```
+
+
 `EDA/DATA_CLEANING.py` prepares six reusable Parquet files from read-only `DATA/CAR_DATA.db`, under `DATA/CAR_DATA_FINAL/`:
 
 | SQLite table | Output file | Preparation |

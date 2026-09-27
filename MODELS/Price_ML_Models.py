@@ -2,8 +2,8 @@
 
 This file deliberately leaves the target, feature set, joins, sampling policy,
 preprocessing, and validation strategy open until EDA is complete. It consumes
-the same cleaned Polars batches as EDA/DATA_CLEANING.py; that loader does not
-write changes back to SQLite.
+saved CAR_DATA_FINAL Parquet files as Polars batches; SQLite is only read
+during the separate cleaning/export step.
 
 Research context: used-car studies compare linear and tree-ensemble regressors
 and evaluate feature engineering. See the project README for references.
@@ -16,7 +16,7 @@ from typing import Any
 
 import polars as pl
 
-from EDA.DATA_CLEANING import load_data
+from EDA.DATA_CLEANING import load_final_data, scan_final_table
 
 
 RANDOM_SEED = 42
@@ -37,8 +37,8 @@ PARAMETER_DISTRIBUTIONS: dict[str, dict[str, Any]] = {
 
 
 def iter_cleaned_batches() -> Iterator[tuple[str, pl.DataFrame]]:
-    """Yield the selected cleaned table batches from DATA_CLEANING.py."""
-    yield from load_data()
+    """Yield saved CAR_DATA_FINAL tables as Polars batches without re-cleaning."""
+    yield from load_final_data()
 
 
 def prepare_training_data(

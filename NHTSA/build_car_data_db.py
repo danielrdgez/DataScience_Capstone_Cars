@@ -117,6 +117,11 @@ def create_schema(conn: sqlite3.Connection) -> None:
         query_id INTEGER NOT NULL, vehicle_id TEXT NOT NULL, field_name TEXT NOT NULL,
         field_value TEXT, PRIMARY KEY(query_id, vehicle_id, field_name)
     );
+    CREATE TABLE IF NOT EXISTS nhtsa_safety_rating_fetches (
+        vehicle_id TEXT PRIMARY KEY NOT NULL, status TEXT NOT NULL,
+        result_count INTEGER NOT NULL DEFAULT 0, results_json TEXT,
+        error TEXT, fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE TABLE IF NOT EXISTS nhtsa_queries (
         query_id INTEGER PRIMARY KEY AUTOINCREMENT, query_type TEXT NOT NULL,
         model_year INTEGER, make TEXT, model TEXT, vin TEXT,
@@ -261,15 +266,131 @@ def insert_query(conn: sqlite3.Connection, kind: str, year: int | None, make: st
       (kind, year, make, model, vin)).fetchone()[0])
 
 
+def fetch_safety_ratings(conn: sqlite3.Connection, year: int, make: str,
+                         model: str, delay: float, refresh: bool,
+                         attempted_ids: set[str]) -> None:
+    """Discover variants, then persist full ratings with resumable per-ID state.
+
+    Existing discovery rows and completed detail responses are reused unless
+    refresh is requested. Detail failure never deletes previously stored values.
+    """
+    query = conn.execute("""SELECT query_id,status FROM nhtsa_queries
+        WHERE query_type='safety_ratings' AND model_year IS ?
+          AND make IS ? AND model IS ? AND vin IS NULL
+        ORDER BY EXISTS (SELECT 1 FROM nhtsa_safety_rating_values v
+                         WHERE v.query_id=nhtsa_queries.query_id) DESC,
+                 query_id DESC LIMIT 1""", (year, make, model)).fetchone()
+    if query:
+        qid, discovery_status = query
+    else:
+        qid = conn.execute("""INSERT INTO nhtsa_queries
+            (query_type,model_year,make,model,status)
+            VALUES ('safety_ratings',?,?,?,'pending')""", (year, make, model)).lastrowid
+        discovery_status = "pending"
+        conn.commit()
+
+    if refresh or discovery_status != "success":
+        try:
+            url = (f"{BASE}/SafetyRatings/modelyear/{year}/make/"
+                   f"{quote(make, safe='')}/model/{quote(model, safe='')}")
+            payload = request_json(url, {"format": "json"})
+            variants = payload.get("Results", payload.get("results"))
+            if not isinstance(variants, list) or any(not isinstance(v, dict) for v in variants):
+                raise ValueError("Safety variant response has no valid Results list.")
+            for variant in variants:
+                vehicle_id = variant.get("VehicleId")
+                if vehicle_id is None or not str(vehicle_id).isdigit():
+                    raise ValueError("Safety variant response has no valid VehicleId.")
+            for variant in variants:
+                vehicle_id = str(variant["VehicleId"])
+                conn.executemany("""INSERT INTO nhtsa_safety_rating_values
+                    (query_id,vehicle_id,field_name,field_value) VALUES (?,?,?,?)
+                    ON CONFLICT(query_id,vehicle_id,field_name) DO NOTHING""",
+                    [(qid, vehicle_id, str(k), None if v is None else str(v))
+                     for k, v in variant.items()])
+            conn.execute("""UPDATE nhtsa_queries SET status='success',result_count=?,
+                error=NULL,fetched_at=CURRENT_TIMESTAMP WHERE query_id=?""", (len(variants), qid))
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            conn.execute("""UPDATE nhtsa_queries SET status='error',error=?,
+                fetched_at=CURRENT_TIMESTAMP WHERE query_id=?""", (str(exc)[:1000], qid))
+            conn.commit()
+            LOG.warning("Safety variant query failed for %s %s %s: %s", year, make, model, exc)
+            return
+        finally:
+            time.sleep(delay)
+
+    vehicle_ids = [r[0] for r in conn.execute("""SELECT DISTINCT vehicle_id
+        FROM nhtsa_safety_rating_values WHERE query_id=? ORDER BY vehicle_id""", (qid,))]
+    for vehicle_id in vehicle_ids:
+        if not vehicle_id.isdigit():
+            LOG.warning("Skipping invalid stored safety VehicleId %r for query %s", vehicle_id, qid)
+            continue
+        cached = conn.execute("""SELECT status,results_json FROM nhtsa_safety_rating_fetches
+            WHERE vehicle_id=?""", (vehicle_id,)).fetchone()
+        use_cache = cached and cached[0] in ("success", "no_results") and (
+            not refresh or vehicle_id in attempted_ids)
+        if use_cache:
+            rows = json.loads(cached[1])
+        elif vehicle_id in attempted_ids:
+            # Retry failed requests on the next run, not for every linked query.
+            continue
+        else:
+            attempted_ids.add(vehicle_id)
+            try:
+                payload = request_json(f"{BASE}/SafetyRatings/VehicleId/{vehicle_id}", {"format": "json"})
+                rows = payload.get("Results", payload.get("results"))
+                if not isinstance(rows, list) or len(rows) > 1:
+                    raise ValueError("Safety detail response must contain zero or one result.")
+                if rows and (not isinstance(rows[0], dict)
+                             or str(rows[0].get("VehicleId")) != vehicle_id
+                             or "OverallRating" not in rows[0]):
+                    raise ValueError("Safety detail result has a mismatched VehicleId or no OverallRating.")
+                conn.execute("""INSERT INTO nhtsa_safety_rating_fetches
+                    (vehicle_id,status,result_count,results_json,error) VALUES (?,?,?,?,NULL)
+                    ON CONFLICT(vehicle_id) DO UPDATE SET status=excluded.status,
+                    result_count=excluded.result_count,results_json=excluded.results_json,
+                    error=NULL,fetched_at=CURRENT_TIMESTAMP""",
+                    (vehicle_id, "success" if rows else "no_results", len(rows),
+                     json.dumps(rows, ensure_ascii=False)))
+            except Exception as exc:
+                conn.rollback()
+                conn.execute("""INSERT INTO nhtsa_safety_rating_fetches
+                    (vehicle_id,status,error) VALUES (?,'error',?)
+                    ON CONFLICT(vehicle_id) DO UPDATE SET status='error',
+                    error=excluded.error,fetched_at=CURRENT_TIMESTAMP""", (vehicle_id, str(exc)[:1000]))
+                conn.commit()
+                LOG.warning("Safety detail query failed for VehicleId %s: %s", vehicle_id, exc)
+                continue
+            finally:
+                time.sleep(delay)
+
+        for row in rows:
+            # Retain discovery identity text while adding all other detail fields.
+            conn.executemany("""INSERT INTO nhtsa_safety_rating_values
+                (query_id,vehicle_id,field_name,field_value) VALUES (?,?,?,?)
+                ON CONFLICT(query_id,vehicle_id,field_name) DO UPDATE SET
+                field_value=excluded.field_value""",
+                [(qid, vehicle_id, str(k), None if v is None else str(v))
+                 for k, v in row.items() if k not in ("VehicleId", "VehicleDescription")])
+        conn.commit()
+    if vehicle_ids:
+        LOG.info("Safety query %s: processed %s variants for %s %s %s",
+                 qid, len(vehicle_ids), year, make, model)
+
+
 def fetch_vehicle_tables(conn: sqlite3.Connection, delay: float,
                          kinds: tuple[str, ...] = ("recalls", "complaints", "safety"),
                          limit: int | None = None,
-                         catalog: VehicleCatalog | None = None) -> None:
+                         catalog: VehicleCatalog | None = None,
+                         refresh_safety: bool = False) -> None:
     cursor = conn.execute("""SELECT DISTINCT year,make_name,model_name FROM used_cars
       WHERE year IS NOT NULL AND make_name IS NOT NULL AND model_name IS NOT NULL
       ORDER BY year,make_name,model_name""")
     catalog = catalog or VehicleCatalog()
     total = 0
+    attempted_safety_ids: set[str] = set()
     while mmy_batch := cursor.fetchmany(1000):
         for year_text, source_make, source_model in mmy_batch:
             if limit is not None and total >= limit:
@@ -279,6 +400,10 @@ def fetch_vehicle_tables(conn: sqlite3.Connection, delay: float,
             except (TypeError, ValueError):
                 continue
             for kind in kinds:
+                if kind == "safety":
+                    fetch_safety_ratings(conn, year, source_make, source_model,
+                                         delay, refresh_safety, attempted_safety_ids)
+                    continue
                 table_kind = "safety_ratings" if kind == "safety" else kind
                 try:
                     if kind in ("recalls", "complaints"):
@@ -293,11 +418,6 @@ def fetch_vehicle_tables(conn: sqlite3.Connection, delay: float,
                         url = f"{BASE}/{kind}/{kind}ByVehicle"
                         params = {"modelYear": year, "make": query_make,
                                   "model": query_model, "format": "json"}
-                    else:
-                        query_make, query_model = source_make, source_model
-                        url = (f"{BASE}/SafetyRatings/modelyear/{year}/make/"
-                               f"{quote(query_make, safe='')}/model/{quote(query_model, safe='')}")
-                        params = {"format": "json"}
 
                     rows = result_list(request_json(url, params))
                     qid = insert_query(conn, table_kind, year, source_make, source_model,
@@ -311,14 +431,6 @@ def fetch_vehicle_tables(conn: sqlite3.Connection, delay: float,
                             f"INSERT OR REPLACE INTO {table} (query_id,record_key,model_year,make,model,record_json) VALUES (?,?,?,?,?,?)",
                             [(qid, str(j), year, source_make, source_model,
                               json.dumps(row, ensure_ascii=False)) for j, row in enumerate(rows)])
-                    else:
-                        conn.execute("DELETE FROM nhtsa_safety_rating_values WHERE query_id=?", (qid,))
-                        values = []
-                        for row in rows:
-                            vehicle_id = str(row.get("VehicleId", "unknown"))
-                            values.extend((qid, vehicle_id, str(k), None if v is None else str(v))
-                                          for k, v in row.items())
-                        conn.executemany("INSERT OR REPLACE INTO nhtsa_safety_rating_values VALUES (?,?,?,?)", values)
                     conn.commit()
                 except Exception as exc:
                     LOG.warning("%s query failed for %s %s %s: %s",
@@ -506,6 +618,8 @@ def main() -> None:
                         help="Maximum listings to load and/or unique VINs or vehicle identities to query.")
     parser.add_argument("--batch-size", type=int, default=5000)
     parser.add_argument("--delay", type=float, default=0.25, help="Seconds between NHTSA API requests.")
+    parser.add_argument("--refresh-safety", action="store_true",
+                        help="Refresh safety discovery and completed rating details; otherwise resume/backfill missing details.")
     parser.add_argument("--only", action="append", choices=("all", "recalls", "complaints", "vpic", "safety"),
                         help="Query one source. Repeat for multiple sources; defaults to local vPIC decoding only.")
     parser.add_argument("--vpic-server", default="localhost", help="Local SQL Server instance hosting the restored vPIC backup.")
@@ -548,7 +662,8 @@ def main() -> None:
         catalog = VehicleCatalog()
         for selection in selections:
             if selection in ("recalls", "complaints", "safety"):
-                fetch_vehicle_tables(conn, args.delay, (selection,), args.limit, catalog)
+                fetch_vehicle_tables(conn, args.delay, (selection,), args.limit, catalog,
+                                     refresh_safety=args.refresh_safety)
             elif selection == "vpic":
                 fetch_vpic(conn, args.vpic_server, args.vpic_database, args.vpic_driver,
                            args.vpic_batch_size, args.limit)
