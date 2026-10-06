@@ -1,0 +1,12 @@
+# Install torch==2.7.1 from the cu126 index FIRST (see GPU_TEXT_RUNBOOK.md).
+# This environment is separate from the existing project/legacy sentiment environment.
+torch==2.7.1
+transformers==4.57.6
+sentence-transformers==5.7.0
+huggingface-hub==0.36.2
+polars>=1.39,<2
+pyarrow>=19,<25
+scikit-learn>=1.7,<2
+langdetect==1.0.9
+sentencepiece>=0.2,<0.3
+protobuf>=5,<8

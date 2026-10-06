@@ -10,7 +10,16 @@
 - Update `README.md` when project structure, setup steps, or workflows change.
 - Update `DATA_DICTIONARY.md` when datasets, fields, sources, or transformations change.
 - Whenever a project change affects documented behavior, update `README.md` and/or `DATA_DICTIONARY.md` in the same change: keep the README current with project workflows and use Mermaid diagrams there when they clarify a workflow; keep the data dictionary limited to data-specific information about the dataset selected for model development.
+- Whenever a project process or workflow changes, update `README.md` in the same change with the current process description and a Mermaid diagram of that process and workflow.
+- Whenever a planned or completed data change affects the model-development dataset (including its sources, fields, schema, or transformations), update `DATA_DICTIONARY.md` in the same change so its data definitions and profiles reflect that change.
 - Use clear commit messages that describe the change.
+
+## Data Scientist Working Standards
+
+- Work as a professional data scientist: use sound methodology, explicit data definitions, reproducible analysis, and evidence-based conclusions.
+- Write clean, concise, legible code with descriptive names and focused functions. Keep comments brief and use them only to explain non-obvious reasoning or constraints.
+- Keep file creation proportional to the task. Reuse existing modules and workflows; avoid excessive test files, redundant scripts, and unnecessary scaffolding.
+- Verify consequential transformations, joins, leakage controls, and model behavior with focused checks. Prefer a small number of meaningful tests over tests that simply mirror the implementation.
 
 ## Project Notes
 

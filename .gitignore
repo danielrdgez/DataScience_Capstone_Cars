@@ -8,6 +8,8 @@ __pycache__/
 
 # Virtual environments
 .venv/
+.venv-youtube/
+YOUTUBE/.cache/
 venv/
 env/
 
@@ -39,11 +41,19 @@ MODELS/artifacts/
 *.joblib
 *.h5
 *.onnx
+MODEL_OUTPUT/*
+!MODEL_OUTPUT/.gitkeep
 
 # Reports and generated outputs
 reports/
 figures/
 outputs/
+
+# Disposable temporary files and run logs
+*.tmp
+*.temp
+*.log
+*~
 
 # OS/editor files
 .DS_Store

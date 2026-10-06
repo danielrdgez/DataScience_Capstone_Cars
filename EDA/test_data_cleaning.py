@@ -3,6 +3,7 @@
 Run from the project root with: python -m unittest discover -s EDA -p "test_*.py"
 """
 
+import csv
 import sqlite3
 import tempfile
 import unittest
@@ -16,6 +17,15 @@ from DATA_CLEANING import (
     USED_CARS_INTEGER_COLUMNS, USED_CARS_UNITS, TABLES_TO_EXPORT,
     INTEGER_COLUMNS, FLOAT_COLUMNS, PARQUET_FILES,
 )
+
+
+def write_cohort_review(root, rows=()):
+    path = root / 'review.csv'
+    with path.open('w', newline='', encoding='utf-8') as stream:
+        writer = csv.writer(stream)
+        writer.writerow(['vin', 'price_to_cohort_median', 'mileage_to_cohort_median'])
+        writer.writerows(rows)
+    return path
 
 
 class SourcePreservationTests(unittest.TestCase):
@@ -110,22 +120,25 @@ class SourcePreservationTests(unittest.TestCase):
                 if table == "used_cars":
                     rows.extend(batch.rows())
                 else:
-                    self.assertEqual(batch["record_json"].to_list(), [record])
+                    self.assertNotIn('record_json', batch.columns)
+                    self.assertEqual(batch['summary'].to_list(), [''])
+                    self.assertEqual(batch['crash'].to_list(), [False])
+                    self.assertEqual(batch['numberOfDeaths'].to_list(), [0])
             self.assertEqual(rows, [(960, 35.1), (None, None), (None, None)])
             self.assertEqual(database.read_bytes(), before)
 
 
 class ParquetExportTests(unittest.TestCase):
     def test_round_trip_fixed_schema_and_default_scope(self):
-        self.assertEqual(len(TABLES_TO_EXPORT), 5)
+        self.assertEqual(len(TABLES_TO_EXPORT), 6)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             database = root / 'source.db'
             with sqlite3.connect(database) as connection:
-                connection.execute('CREATE TABLE used_cars (vin TEXT, price TEXT, height TEXT, listed_date TEXT, dealer_zip TEXT)')
-                connection.executemany('INSERT INTO used_cars VALUES (?,?,?,?,?)', [
-                    ('a', '', None, None, ''), ('b', '12.5', '66.5 in', '2020-01-01', '00960'),
-                    ('c', '12.49', '--', 'invalid', None),
+                connection.execute('CREATE TABLE used_cars (vin TEXT, price TEXT, height TEXT, listed_date TEXT, dealer_zip TEXT, mileage TEXT)')
+                connection.executemany('INSERT INTO used_cars VALUES (?,?,?,?,?,?)', [
+                    ('a', '', None, None, '', '0'), ('b', '12.5', '66.5 in', '2020-01-01', '00960', '100'),
+                    ('c', '12.49', '--', 'invalid', None, '200'),
                 ])
                 connection.execute('CREATE TABLE nhtsa_vpic_decodes (vpic_Doors TEXT, vpic_BasePrice TEXT, fetched_at TEXT, vpic_ABS TEXT)')
                 connection.executemany('INSERT INTO nhtsa_vpic_decodes VALUES (?,?,?,?)', [
@@ -137,7 +150,9 @@ class ParquetExportTests(unittest.TestCase):
             before = database.read_bytes()
             output = root / 'final'
             tables = ('used_cars', 'nhtsa_vpic_decodes', 'nhtsa_recalls')
-            report = export_parquet(database, output, batch_size=1, table_names=tables)
+            review = write_cohort_review(root)
+            report = export_parquet(database, output, batch_size=1, table_names=tables,
+                                    cohort_review_csv=review)
             self.assertEqual(database.read_bytes(), before)
             self.assertEqual(report['tables']['used_cars']['rows'], 3)
             self.assertEqual(report['tables']['used_cars']['new_nulls_from_conversion']['price'], 1)
@@ -153,12 +168,12 @@ class ParquetExportTests(unittest.TestCase):
             self.assertEqual(vpic['BasePrice'].dtype, pl.Float64)
             self.assertEqual(vpic['ABS'].to_list(), [None, 'Standard'])
             empty = scan_final_table('nhtsa_recalls', output).collect()
-            self.assertEqual(empty.schema, {'query_id': pl.Int64, 'record_json': pl.String})
+            self.assertEqual(empty.schema, {'query_id': pl.Int64})
             batches = list(load_final_data(output, batch_size=2, table_names=("used_cars",)))
             self.assertEqual([name for name, _ in batches], ['used_cars', 'used_cars'])
             self.assertTrue(pl.concat([batch for _, batch in batches]).equals(actual))
-            with self.assertRaises(FileExistsError):
-                export_parquet(database, output)
+            export_parquet(database, output, table_names=tables, cohort_review_csv=review)
+            self.assertTrue(scan_final_table(dataset_path=output).collect().equals(actual))
             with self.assertRaises(RuntimeError):
                 export_parquet(database, root / 'missing', table_names=('nhtsa_complaints',))
             self.assertFalse((root / 'missing').exists())
@@ -171,9 +186,35 @@ class ParquetExportTests(unittest.TestCase):
             with sqlite3.connect(database) as connection:
                 connection.execute('CREATE TABLE used_cars (price TEXT, listed_date TEXT)')
             connection.close()
-            export_parquet(database, root / 'final', table_names=('used_cars',))
+            export_parquet(database, root / 'final', table_names=('used_cars',),
+                           cohort_review_csv=write_cohort_review(root))
             self.assertEqual(scan_final_table(dataset_path=root / 'final').collect_schema(),
                              {'price': pl.Int64, 'listed_date': pl.Date})
+
+    def test_listing_exclusions_use_review_boundaries_and_preserve_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / 'source.db'
+            with sqlite3.connect(database) as connection:
+                connection.execute('CREATE TABLE used_cars (vin TEXT, price TEXT, mileage TEXT)')
+                connection.executemany('INSERT INTO used_cars VALUES (?, ?, ?)', [
+                    ('keep', '1000000', '1000000'), ('high', '100', '10'),
+                    ('low', '100', '10'), ('miles', '100', '10'), ('missing', '100', ''),
+                ])
+            connection.close()
+            before = database.read_bytes()
+            review = write_cohort_review(root, [
+                ('keep', '2', '20'), ('high', '2.001', '1'),
+                ('low', '0.75', '1'), ('miles', '1', '20.001'),
+            ])
+            report = export_parquet(database, root / 'final', batch_size=2,
+                                    table_names=('used_cars',), cohort_review_csv=review)
+            actual = scan_final_table(dataset_path=root / 'final').collect()
+            self.assertEqual(actual['vin'].to_list(), ['keep'])
+            filtering = report['tables']['used_cars']['row_filtering']
+            self.assertEqual(filtering['null_mileage_rows_removed'], 1)
+            self.assertEqual(filtering['rows_removed_for_reviewed_vins'], 3)
+            self.assertEqual(database.read_bytes(), before)
 
 
 class NHTSATransformationTests(unittest.TestCase):
@@ -204,7 +245,8 @@ class NHTSATransformationTests(unittest.TestCase):
                  'late_key': 'appeared later', 'mixed': 'two'},
             ]
             with sqlite3.connect(database) as connection:
-                connection.execute('CREATE TABLE used_cars (price TEXT)')
+                connection.execute('CREATE TABLE used_cars (vin TEXT, price TEXT, mileage TEXT)')
+                connection.execute('CREATE TABLE youtube_comments_sentiment (comment_id TEXT, comment TEXT)')
                 connection.execute('CREATE TABLE nhtsa_vpic_decodes (vpic_Doors TEXT)')
                 for table in ('nhtsa_complaints', 'nhtsa_recalls'):
                     connection.execute(f'CREATE TABLE {table} (query_id INTEGER, model_year TEXT, make TEXT, record_json TEXT)')
@@ -213,14 +255,15 @@ class NHTSATransformationTests(unittest.TestCase):
                          (2, '2021.5', 'other make', json.dumps(records[1]))])
                 connection.execute('CREATE TABLE nhtsa_safety_rating_values (query_id INTEGER, vehicle_id TEXT, field_name TEXT, field_value TEXT)')
                 connection.executemany('INSERT INTO nhtsa_safety_rating_values VALUES (?,?,?,?)', [
-                    (1, 'a', 'OverallRating', '5'), (1, 'a', 'dynamicTipResult', ' '),
-                    (1, 'b', 'OverallRating', 'Not Rated'), (2, 'a', 'OverallRating', '4'),
-                    (1, 'b', 'SideRating', None), (2, 'a', 'SideRating', ''),
+                    (1, '10', 'OverallRating', '5'), (1, '10', 'dynamicTipResult', ' '),
+                    (1, '11', 'OverallRating', 'Not Rated'), (2, '10', 'OverallRating', '4'),
+                    (1, '11', 'SideRating', None), (2, '10', 'SideRating', ''),
                 ])
             connection.close()
             before = database.read_bytes()
             tables = ('nhtsa_complaints', 'nhtsa_recalls', 'nhtsa_safety_rating_values')
-            report = export_parquet(database, root / 'final', batch_size=1)
+            report = export_parquet(database, root / 'final', batch_size=1,
+                                    cohort_review_csv=write_cohort_review(root))
             self.assertEqual(set(report['tables']), set(TABLES_TO_EXPORT))
             self.assertEqual({path.name for path in (root / 'final').glob('*.parquet')}, set(PARQUET_FILES.values()))
             self.assertEqual(database.read_bytes(), before)
@@ -235,12 +278,12 @@ class NHTSATransformationTests(unittest.TestCase):
                 self.assertEqual(result['make'].to_list(), ['listing make', 'other make'])
                 self.assertEqual(result['json_json_make'].to_list(), ['source make', None])
                 self.assertEqual(json.loads(result['products'][0]), records[0]['products'])
-                self.assertEqual(json.loads(result['record_json'][1]), records[1])
+                self.assertNotIn('record_json', result.columns)
                 self.assertTrue((root / 'final' / PARQUET_FILES[table]).is_file())
             safety = scan_final_table('nhtsa_safety_rating_values', root / 'final').collect()
             self.assertEqual(safety.height, 3)
-            self.assertEqual(safety.select('query_id', 'vehicle_id').rows(), [(1, 'a'), (1, 'b'), (2, 'a')])
-            self.assertEqual(safety['OverallRating'].to_list(), ['5', 'Not Rated', '4'])
+            self.assertEqual(safety.select('query_id', 'vehicle_id').rows(), [(1, 10), (1, 11), (2, 10)])
+            self.assertEqual(safety['OverallRating'].to_list(), [5, None, 4])
             self.assertEqual(safety['dynamicTipResult'].to_list(), [' ', None, None])
             self.assertEqual(safety['SideRating'].to_list(), [None, None, ''])
             self.assertNotIn('field_name', safety.columns)

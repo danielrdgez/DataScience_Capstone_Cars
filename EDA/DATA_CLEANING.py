@@ -71,6 +71,26 @@ PARQUET_FILES = {
     "youtube_comments_sentiment": "Youtube_Comments.parquet",
 }
 JSON_TABLES = ("nhtsa_complaints", "nhtsa_recalls")
+SAFETY_INTEGER_COLUMNS = (
+    "query_id", "vehicle_id", "ComplaintsCount", "FrontCrashDriversideRating",
+    "FrontCrashPassengersideRating", "InvestigationCount", "ModelYear",
+    "OverallFrontCrashRating", "OverallRating", "OverallSideCrashRating",
+    "RecallsCount", "RolloverRating", "RolloverRating2",
+    "SideCrashDriversideRating", "SideCrashPassengersideRating",
+    "SidePoleCrashRating", "VehicleId",
+    "combinedSideBarrierAndPoleRating-Front",
+    "combinedSideBarrierAndPoleRating-Rear", "sideBarrierRating-Overall",
+)
+SAFETY_FLOAT_COLUMNS = ("RolloverPossibility", "RolloverPossibility2")
+JSON_INTEGER_COLUMNS = {
+    "nhtsa_complaints": ("query_id", "record_key", "model_year"),
+    "nhtsa_recalls": ("query_id", "record_key", "model_year", "ModelYear"),
+}
+JSON_DATE_COLUMNS = {
+    "nhtsa_complaints": {"dateComplaintFiled": "%m/%d/%Y", "dateOfIncident": "%m/%d/%Y"},
+    "nhtsa_recalls": {"ReportReceivedDate": "%d/%m/%Y"},
+}
+DEFAULT_COHORT_REVIEW_DIR = PROJECT_ROOT / "MODEL_OUTPUT" / "diagnostics" / "cohort_outliers"
 DROP_COLUMNS = frozenset((
     "bed_height", "combine_fuel_economy", "is_certified", "main_picture_url",
     "sp_id", "sp_name", "trimID", "vehicle_damage_category", "DriverAssist",
@@ -288,6 +308,54 @@ def _expand_json(batch: pl.DataFrame, table: str, columns: dict) -> pl.DataFrame
     ])
 
 
+def _cast_json_types(batch: pl.DataFrame, table: str) -> pl.DataFrame:
+    """Apply requested integer and date types to expanded NHTSA records."""
+    integer_exprs = _numeric_expressions(batch, (), JSON_INTEGER_COLUMNS[table], {})
+    date_exprs = [
+        pl.col(name).cast(pl.String).str.strip_chars()
+        .str.to_date(format=date_format, strict=False).alias(name)
+        for name, date_format in JSON_DATE_COLUMNS[table].items()
+        if name in batch.columns
+    ]
+    return batch.with_columns(integer_exprs + date_exprs)
+
+
+def _load_cohort_exclusion_vins(review_csv: Path | None) -> set[str]:
+    """Load the prior cohort-ratio exclusion policy from a review candidate file."""
+    import csv
+
+    if review_csv is None:
+        candidates = sorted(DEFAULT_COHORT_REVIEW_DIR.glob("*/cohort_outlier_candidates.csv"))
+        if not candidates:
+            raise FileNotFoundError(
+                "No cohort review candidate CSV found. Run "
+                "MODELS.cohort_price_mileage_review before exporting."
+            )
+        review_csv = candidates[-1]
+    if not review_csv.is_file():
+        raise FileNotFoundError(review_csv)
+    excluded: set[str] = set()
+    with review_csv.open(newline="", encoding="utf-8-sig") as source:
+        for row in csv.DictReader(source):
+            vin = (row.get("vin") or "").strip()
+            if not vin:
+                continue
+            price_ratio = _finite_float(row.get("price_to_cohort_median"))
+            mileage_ratio = _finite_float(row.get("mileage_to_cohort_median"))
+            if ((price_ratio is not None and (price_ratio > 2.0 or price_ratio <= 0.75))
+                    or (mileage_ratio is not None and mileage_ratio > 20.0)):
+                excluded.add(vin)
+    return excluded
+
+
+def _finite_float(value: str | None) -> float | None:
+    try:
+        number = float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+    return number if number is not None and math.isfinite(number) else None
+
+
 def _table_plan(connection: sqlite3.Connection, table: str, schema: dict,
                 batch_size: int) -> dict:
     plan = {"query": f'SELECT * FROM "{table}"', "parameters": (),
@@ -341,8 +409,12 @@ def _transform_for_export(table: str, batch: pl.DataFrame, plan: dict) -> pl.Dat
             # Preserve original source column order after renaming.
             batch = batch.select([name.removeprefix("vpic_") for name in plan["read_schema"]])
     elif table in JSON_TABLES:
-        batch = batch.with_columns(_numeric_expressions(batch, (), ("model_year",), {}))
         batch = _expand_json(batch, table, plan["json_columns"])
+        batch = _cast_json_types(batch, table)
+    elif table == "nhtsa_safety_rating_values":
+        batch = batch.with_columns(_numeric_expressions(
+            batch, SAFETY_FLOAT_COLUMNS, SAFETY_INTEGER_COLUMNS, {}
+        ))
     # Apply exclusions after all derived columns are present; this also removes
     # matching keys discovered in expanded complaint/recall JSON.
     drop = [name for name in batch.columns if name in DROP_COLUMNS or name == "record_json"]
@@ -370,7 +442,8 @@ def load_data(database_path: Path = DATABASE_PATH, batch_size: int = BATCH_SIZE,
 def export_parquet(database_path: Path = DATABASE_PATH,
                    output_dir: Path = FINAL_DATASET_PATH,
                    batch_size: int = BATCH_SIZE,
-                   table_names: tuple[str, ...] = TABLES_TO_EXPORT) -> dict:
+                   table_names: tuple[str, ...] = TABLES_TO_EXPORT,
+                   cohort_review_csv: Path | None = None) -> dict:
     """Write a complete new dataset, publishing only after all files are verified.
 
     The complete validated dataset replaces any existing output directory.
@@ -383,6 +456,10 @@ def export_parquet(database_path: Path = DATABASE_PATH,
         raise ValueError("batch_size must be positive")
     if not database_path.is_file():
         raise FileNotFoundError(database_path)
+    excluded_vins = _load_cohort_exclusion_vins(cohort_review_csv) if "used_cars" in table_names else set()
+    review_source = cohort_review_csv
+    if review_source is None and excluded_vins:
+        review_source = sorted(DEFAULT_COHORT_REVIEW_DIR.glob("*/cohort_outlier_candidates.csv"))[-1]
     output_dir = output_dir.resolve()
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -404,6 +481,9 @@ def export_parquet(database_path: Path = DATABASE_PATH,
                 empty = _transform_for_export(table, pl.DataFrame(schema=plan["read_schema"]), plan)
                 path = staging / PARQUET_FILES[table]
                 rows = 0
+                null_mileage_rows = 0
+                removed_rows = 0
+                removed_review_rows = 0
                 column_names = {
                     name: name.removeprefix("vpic_") if table == "nhtsa_vpic_decodes" else name
                     for name in schema
@@ -419,8 +499,16 @@ def export_parquet(database_path: Path = DATABASE_PATH,
                         source_nulls = batch.null_count().row(0, named=True) if new_nulls else {}
                         result = _transform_for_export(table, batch, plan)
                         del batch
+                        result_nulls = result.null_count().row(0, named=True) if new_nulls else {}
+                        if table == "used_cars":
+                            null_mileage_rows += int(result.get_column("mileage").is_null().sum())
+                            before = result.height
+                            result = result.filter(pl.col("mileage").is_not_null())
+                            removed_rows += before - result.height
+                            before = result.height
+                            result = result.filter(~pl.col("vin").is_in(list(excluded_vins)))
+                            removed_review_rows += before - result.height
                         if new_nulls:
-                            result_nulls = result.null_count().row(0, named=True)
                             for source_name, output_name in column_names.items():
                                 new_nulls[output_name] += result_nulls[output_name] - source_nulls[source_name]
                         writer.write_table(result.to_arrow(), row_group_size=batch_size)
@@ -428,7 +516,11 @@ def export_parquet(database_path: Path = DATABASE_PATH,
                         del result
                         print(f"  {table}: {rows:,} rows written", flush=True)
                 with pq.ParquetFile(path) as parquet:
-                    if parquet.metadata.num_rows != rows or rows != plan["expected_rows"]:
+                    expected_output_rows = (
+                        plan["expected_rows"] - removed_rows - removed_review_rows if table == "used_cars"
+                        else plan["expected_rows"]
+                    )
+                    if parquet.metadata.num_rows != rows or rows != expected_output_rows:
                         raise RuntimeError(f"Parquet row count mismatch: {table}")
                 manifest["tables"][table] = {
                     "file": path.name, "source_rows": plan["source_rows"], "rows": rows, "bytes": path.stat().st_size,
@@ -436,6 +528,16 @@ def export_parquet(database_path: Path = DATABASE_PATH,
                     "schema": {name: str(dtype) for name, dtype in empty.schema.items()},
                     "new_nulls_from_conversion": {name: count for name, count in new_nulls.items() if count},
                 }
+                if table == "used_cars":
+                    manifest["tables"][table]["row_filtering"] = {
+                        "applied": True,
+                        "rows_removed": removed_rows,
+                        "null_mileage_rows_removed": null_mileage_rows,
+                        "cohort_review_csv": str(review_source) if review_source else None,
+                        "cohort_ratio_policy": "exclude VIN when price/cohort median > 2 or <= 0.75, or mileage/cohort median > 20",
+                        "candidate_vins_removed": len(excluded_vins),
+                        "rows_removed_for_reviewed_vins": removed_review_rows,
+                    }
         (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         backup = output_dir.with_name(f".{output_dir.name}.backup-{uuid.uuid4().hex}")
         had_existing_output = output_dir.exists()
@@ -490,8 +592,10 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--database", type=Path, default=DATABASE_PATH)
     parser.add_argument("--output-dir", type=Path, default=FINAL_DATASET_PATH)
+    parser.add_argument("--cohort-review-csv", type=Path,
+                        help="Candidate file from cohort_price_mileage_review; defaults to the latest run.")
     parser.add_argument("--table", action="append", choices=TABLES_TO_LOAD,
                         help="Export selected tables; repeat to select several. Default: all six tables.")
     args = parser.parse_args()
     export_parquet(args.database, args.output_dir, args.batch_size,
-                   tuple(args.table) if args.table else TABLES_TO_EXPORT)
+                   tuple(args.table) if args.table else TABLES_TO_EXPORT, args.cohort_review_csv)
