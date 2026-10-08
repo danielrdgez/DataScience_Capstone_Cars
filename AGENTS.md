@@ -2,31 +2,28 @@
 
 ## Project Instructions
 
-- Work only on the `main` branch unless the user explicitly asks for another branch.
-- Do not create branches with the `codex/` prefix for this project unless the user explicitly asks.
-- Read the project files before making changes, especially `README.md`, `DATA_DICTIONARY.md`, and relevant scripts.
-- Keep changes focused on the user's request and avoid unrelated refactors.
-- Preserve user-created work. Do not revert or overwrite changes unless the user explicitly asks.
-- Update `README.md` when project structure, setup steps, or workflows change.
-- Update `DATA_DICTIONARY.md` when datasets, fields, sources, or transformations change.
-- Whenever a project change affects documented behavior, update `README.md` and/or `DATA_DICTIONARY.md` in the same change: keep the README current with project workflows and use Mermaid diagrams there when they clarify a workflow; keep the data dictionary limited to data-specific information about the dataset selected for model development.
-- Whenever a project process or workflow changes, update `README.md` in the same change with the current process description and a Mermaid diagram of that process and workflow.
-- Whenever a planned or completed data change affects the model-development dataset (including its sources, fields, schema, or transformations), update `DATA_DICTIONARY.md` in the same change so its data definitions and profiles reflect that change.
+- Work on `main`; use another branch or a `codex/` branch only if explicitly requested.
+- Read `README.md`, `DATA_DICTIONARY.md`, and relevant scripts before editing.
+- Keep changes focused. Preserve user work; do not revert or overwrite it without an explicit request.
+- Update documentation in the same change as the behavior it describes: `README.md` for structure, setup, and workflows; `DATA_DICTIONARY.md` for the selected model-development dataset only.
+- Describe workflow changes concisely in `README.md` and include a compact Mermaid diagram.
+- Keep dictionary definitions and profiles current with planned or completed changes to model-data sources, fields, schemas, or transformations.
 - Use clear commit messages that describe the change.
 
 ## Data Scientist Working Standards
 
-- Work as a professional data scientist: use sound methodology, explicit data definitions, reproducible analysis, and evidence-based conclusions.
-- Write clean, concise, legible code with descriptive names and focused functions. Keep comments brief and use them only to explain non-obvious reasoning or constraints.
-- Keep file creation proportional to the task. Reuse existing modules and workflows; avoid excessive test files, redundant scripts, and unnecessary scaffolding.
-- Verify consequential transformations, joins, leakage controls, and model behavior with focused checks. Prefer a small number of meaningful tests over tests that simply mirror the implementation.
+- Use sound methodology, explicit data definitions, reproducible analysis, and evidence-based conclusions.
+- Write legible code with descriptive names, focused functions, and apparent logic. Comment only on non-obvious reasoning or constraints.
+- Keep documentation compact and professional: short sentences, a few bullets, and useful tables. Avoid repeated explanations, boilerplate, and unnecessary narrative.
+- Reuse existing code, tests, and documentation. Do not create a test file, Markdown file, report, or scaffold for every change; add files only when necessary.
+- Verify consequential transformations, joins, leakage controls, and model behavior with a few meaningful checks. Avoid redundant tests or tests that mirror the implementation.
 
 ## Project Notes
 
-This repository supports a data science capstone project about cars. The project will contain datasets, NHTSA-related resources, YouTube-related resources, exploratory data analysis, and machine learning models.
+Car data science capstone: listings, NHTSA data, YouTube comments, EDA, and price models.
 
 ## Cohort Definition
 
-- Whenever the user refers to a vehicle "cohort," interpret it as the combination of `ModelYear`, `Make`, `Model`, and `Trim` from the `NHTSA_vPIC` dataset.
-- Keep cohort dimensions as separate columns in datasets, summaries, and tables. A combined cohort label may be used for chart display only.
-- Link used-car listings to `NHTSA_vPIC` using its lowercase `vin` column when calculating listing price or mileage statistics for cohorts. Never use the capitalized `VIN` decoder-variable column as the join key.
+- A vehicle cohort is `ModelYear`, `Make`, `Model`, and `Trim` from `NHTSA_vPIC`.
+- Keep these as separate columns; combined labels are for chart display only.
+- Join listings to vPIC on lowercase `vin`, including for cohort price/mileage statistics. Never join on the capitalized decoder field `VIN`.
