@@ -49,6 +49,9 @@ reports/
 figures/
 outputs/
 
+# Browser validation receipts
+.playwright-cli/
+
 # Disposable temporary files and run logs
 *.tmp
 *.temp

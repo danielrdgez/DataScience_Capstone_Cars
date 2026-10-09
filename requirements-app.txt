@@ -1,0 +1,9 @@
+# Local dashboard only; model-training dependencies remain in requirements.txt.
+streamlit==1.65.0
+altair==6.3.0
+polars==1.44.2
+pandas==3.0.6
+pyarrow==25.0.1
+numpy==2.5.3
+# Reuses the existing model module's applicability/compatibility helpers.
+scikit-learn==1.9.1

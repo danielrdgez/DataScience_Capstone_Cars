@@ -15,7 +15,9 @@ Car price modeling with listing attributes, NHTSA data, and experimental YouTube
 | `YOUTUBE/` | Comment collection, GPU text pipeline, and preserved sentiment experiments. |
 | `EXPERT_REVIEWS/` | DougScore import, audit, and vehicle-match candidates. |
 | `EDA/` | Cleaning, export, dictionary profiling, and `EDA.ipynb`. |
-| `MODELS/` | Price training and data diagnostics. |
+| `MODELS/` | Price training, data diagnostics, and the recommendation design. |
+| `app.py`, `app_pages/`, `car_app/` | Local Streamlit dashboard and inactive recommendation integration panels. |
+| `requirements-app.txt`, `.streamlit/` | Dashboard dependencies and loopback-only configuration. |
 | `MODEL_OUTPUT/`, `MODEL_OUTPUT.ipynb` | Saved runs and results review. |
 | [DATA_DICTIONARY.md](DATA_DICTIONARY.md) | Source schemas, profiles, and derived model fields. |
 | [AGENTS.md](AGENTS.md) | Project working standards. |
@@ -160,6 +162,75 @@ Review validation and convergence before final testing. Use the printed workspac
 ```
 
 Reports cover overall errors, every make, $25,000 price bands, the `100k+` tier, matched feature/weighting changes, and YouTube join support. No evaluation rows means null errors. Do not tune from exposed test results.
+
+## Local Streamlit dashboard
+
+The app reads the existing snapshot and saved evaluations. It does not train models, collect data, score new listings, or call AI providers.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-app.txt
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+Open **http://127.0.0.1:8501**. The checked-in Streamlit configuration binds to loopback. Streamlit 1.65.0 and Altair 6.3.0 are pinned separately from training dependencies.
+
+- **Dashboard:** cascading Make → Model → Model year → Trim selections and price, mileage, condition, body, fuel, and drivetrain filters. Empty dropdowns mean All; reset clears the scope.
+- Explore actuals, complete decoded cohorts, a paginated listing/specification table, applicable NHTSA evidence, supported make-level YouTube themes, and source definitions. Mileage units remain unverified. Prices are historical advertised USD prices.
+- Complaints and recalls are deduplicated by source ID, checked for family applicability, and restricted to the provisional 2020 cutoff. Safety variants and YouTube makes retain their source grain. Conflicting source versions remain visible; counts are not reliability rates.
+- **Model performance:** the explicit defaults are the compatible September 30 base/enriched 100,000-row pair. Inspect individual estimators and the saved training-median baseline. Filtered test errors use every matching saved prediction, with source-fingerprint checks; only scatter plots are sampled. Paired comparison additionally checks evaluation identities.
+- Validation remains separate. Aggregate reports expose only their saved dimensions; arbitrary filtered validation statistics are unavailable. Running/incomplete runs are excluded, legacy inspection is opt-in, and saved SHAP belongs only to its exact run and recorded scale.
+- **Vehicle Recommendation:** inactive panels for an independent vehicle recommender and **Similar vehicles to the filter in the dashboard**. The latter displays the dashboard reference and invalidates its future results on scope changes. No recommendation system is implemented. See the [integration plan](MODELS/AI_AGENT_RECOMMENDATION_PLAN.md#dashboard-integration-plan).
+- CSV downloads reflect the displayed scope and bounds: listing pages (100 rows), cohort tables (20/200), source detail (500), and metric tables. Headline totals and errors use complete matching populations. Source schemas/profiles and overall saved metrics are explicitly labeled fixed context.
+- Root `.env` is created for future credentials and ignored by Git. The dashboard needs no API key and does not load or transmit that file. Do not put credentials in tracked configuration.
+
+Read-only queries use Polars lazy scans with bounded Streamlit caches. `car_app/data.py` owns source access, `artifacts.py` adapts saved reports, `views.py` renders the dashboard, and `state.py` isolates the three UI scopes.
+
+<!-- mermaid:id=local_dashboard -->
+```mermaid
+flowchart LR
+  P["Parquet snapshot"]
+  F["Dashboard filters"]
+  D["Actuals and evidence"]
+  M["Saved model outputs"]
+  E["Filtered evaluation"]
+  S["Similar vehicles reference"]
+  R["Independent recommender shell"]
+  P --> F
+  F --> D
+  F --> E
+  M --> E
+  F --> S
+```
+
+Run focused checks with `.\.venv\Scripts\python.exe -m unittest car_app.test_dashboard -v`. They cover lowercase-VIN linkage, join cardinality, empty/boundary filters, source deduplication, undefined errors, navigation, and independent recommendation state.
+
+## Proposed AI vehicle recommendation
+
+See the [research and system design](MODELS/AI_AGENT_RECOMMENDATION_PLAN.md) for a conversational recommender using the documented snapshot and compatible price predictors. The dashboard contains inactive integration panels; the recommendation engine remains proposed.
+
+- Code enforces hard filters; the agent elicits preferences and explains historical cohort/listing comparisons.
+- Observed prices enforce budgets. Model estimates support value comparisons; Jev and text evidence are optional experiments.
+
+<!-- mermaid:id=proposed_recommendation -->
+```mermaid
+flowchart TB
+  C["Conversation and preferences"]
+  D["Documented Parquet snapshot"]
+  F["Deterministic hard filters"]
+  M["Compatible price predictors"]
+  S["Price and preference scoring"]
+  J["Optional Jev evaluation"]
+  R["Cohort and listing comparison"]
+  E["Evidence-grounded explanations"]
+  C --> F
+  D --> F
+  F --> S
+  M --> S
+  J -.-> S
+  S --> R
+  R --> E
+  D -.-> E
+```
 
 ## Data conventions
 
