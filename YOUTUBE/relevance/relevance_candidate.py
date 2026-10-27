@@ -400,7 +400,6 @@ def score_pilot(candidate, source, output, size=10_000, seed=43, batch_size=128,
         print(f"Pilot {min(offset + batch_size, len(rows)):,}/{len(rows):,} rows checkpointed", flush=True)
     if before != (source.stat().st_size, source.stat().st_mtime_ns):
         raise ValueError("Source changed during scoring")
-    # Rebuild derived outputs from immutable scored chunks on resume.
     def publish(name, fields, data):
         temporary = output / (name + ".tmp")
         with temporary.open("w", encoding="utf-8-sig", newline="") as handle:

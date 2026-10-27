@@ -111,7 +111,6 @@ def run_review(
     mileage_multiple: float = 3.0, iqr_multiple: float = 3.0,
     min_cohort_size: int = 5,
 ) -> Path:
-    """Write cohort medians, outlier candidates, and rows without a usable cohort."""
     if scope not in {"used", "new", "all"}:
         raise ValueError("scope must be 'used', 'new', or 'all'")
     if min(price_multiple, mileage_multiple, iqr_multiple) <= 1:

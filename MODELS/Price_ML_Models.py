@@ -1,8 +1,11 @@
 """Train reproducible advertised-price models for all vehicle listings.
 
-The two feature sets are listing-only ``base`` and NHTSA-enriched ``enriched``.
+Full combines structured NHTSA, YouTube, and separate DougScore features.
+Expert-only, coverage-only, and ``full_youtube`` variants isolate their contributions.
+The legacy ``enriched`` name retains its structured NHTSA definition.
 The listing-only and NHTSA-enriched feature sets use matching samples and
-splits. Preprocessing is fitted on training rows only.
+splits. The default split stratifies VINs within decoded year/make/model
+cohorts with at least 25 eligible VINs. Preprocessing fits training rows only.
 """
 
 from __future__ import annotations
@@ -14,6 +17,9 @@ import hashlib
 import importlib.metadata
 import sys
 import warnings
+import logging
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +27,7 @@ import polars as pl
 
 from EDA.DATA_CLEANING import (
     _load_cohort_exclusion_vins, clean_used_cars_batch, load_final_data, scan_final_table,
+    EXCLUDED_LISTING_VINS,
 )
 
 import numpy as np
@@ -83,7 +90,6 @@ class PricePreprocessor(TransformerMixin, BaseEstimator):
 
 
 class ExpLogPricePredictor(RegressorMixin, BaseEstimator):
-    """Expose dollar predictions from an estimator trained on ln(price)."""
 
     def __init__(self, estimator):
         self.estimator = estimator
@@ -105,11 +111,55 @@ class ExpLogPricePredictor(RegressorMixin, BaseEstimator):
         return np.exp(self.estimator.predict(X))
 
 
+class FixedNumericPCA(TransformerMixin, BaseEstimator):
+    """Fit a fixed numerical PCA without flags, constant fields or whitening."""
+
+    def __init__(self, n_components=31):
+        self.n_components = n_components
+
+    def fit(self, X, y=None):
+        from sklearn.decomposition import PCA
+        from sklearn.preprocessing import StandardScaler
+
+        values = np.asarray(X, dtype=float)
+        if values.ndim != 2 or not np.isfinite(values).all():
+            raise ValueError("PCR requires finite, training-imputed numerical inputs")
+        self.n_features_in_ = values.shape[1]
+        self.feature_names_in_ = np.asarray(
+            X.columns if hasattr(X, "columns") else [f"x{i}" for i in range(values.shape[1])], dtype=object)
+        self.support_ = np.ptp(values, axis=0) > 0
+        self.retained_features_ = self.feature_names_in_[self.support_].tolist()
+        self.excluded_constant_features_ = self.feature_names_in_[~self.support_].tolist()
+        if min(len(values), int(self.support_.sum())) < self.n_components:
+            raise ValueError(f"PCR requires at least {self.n_components} training rows and varying numerical fields; "
+                             f"received {len(values)} rows and {self.support_.sum()} varying fields")
+        self.scaler_ = StandardScaler()
+        scaled = self.scaler_.fit_transform(values[:, self.support_])
+        version = tuple(int(v) for v in importlib.metadata.version("scikit-learn").split(".")[:2])
+        solver = "covariance_eigh" if version >= (1, 5) else "full"
+        self.pca_ = PCA(n_components=self.n_components, svd_solver=solver, whiten=False).fit(scaled)
+        return self
+
+    def transform(self, X):
+        check_is_fitted(self, "pca_")
+        if hasattr(X, "columns") and list(X.columns) != self.feature_names_in_.tolist():
+            raise ValueError("PCR numerical feature names/order differ from training")
+        values = np.asarray(X, dtype=float)
+        if values.ndim != 2 or values.shape[1] != self.n_features_in_ or not np.isfinite(values).all():
+            raise ValueError("PCR numerical input shape/values differ from the fitted schema")
+        return self.pca_.transform(self.scaler_.transform(values[:, self.support_]))
+
+    def get_feature_names_out(self, input_features=None):
+        check_is_fitted(self, "pca_")
+        return np.asarray([f"PC{i:02d}" for i in range(1, self.n_components + 1)], dtype=object)
+
+
 # The CLI runs this file as ``__main__``. Give saved joblib predictors a stable
 # import path that resolves to this same module in both CLI and notebook use.
 sys.modules.setdefault("MODELS.Price_ML_Models", sys.modules[__name__])
 PricePreprocessor.__module__ = "MODELS.Price_ML_Models"
 ExpLogPricePredictor.__module__ = "MODELS.Price_ML_Models"
+FixedNumericPCA.__module__ = "MODELS.Price_ML_Models"
 
 
 def file_sha256(path):
@@ -219,7 +269,7 @@ def segment_metrics(predictions, model_name):
     data = evaluation_dimensions(predictions)
     rows = []
     for dimension in ("is_new", "cohort_complete", "split_identity_source", "price_band",
-                      "price_tier", "mileage_review_flag", "price_review_flag", "make_name", "Make"):
+                      "price_tier", "mileage_review_flag", "price_review_flag", "make_name", "Make", "doug_source_level"):
         if dimension not in data.columns:
             continue
         for value, part in data.groupby(dimension, observed=True, dropna=False):
@@ -291,12 +341,26 @@ def year_make_metrics(predictions, model_name):
     return rows
 
 
+EXECUTION_MATCH_KEYS = ("device_request", "full_validation", "tuning_sampling_version", "tuning_fingerprint")
+
+
+def execution_protocol_matches(left, right):
+    if any(left.get(key) != right.get(key) for key in EXECUTION_MATCH_KEYS):
+        return False
+    for name in left.get("training_devices", {}).keys() & right.get("training_devices", {}).keys():
+        if left["training_devices"][name]["device"] != right["training_devices"][name]["device"]:
+            return False
+    return True
+
+
 def compatible_run_metadata(left, right, *, allow_feature_set=False, allow_price_weighting=False):
     """Old runs without content/split/code identities cannot be auto-combined."""
     required = ("dataset_fingerprint", "split_fingerprint", "code_fingerprint",
                 "preprocessing_version", "package_versions", "tuning_rows", "max_trees",
                 "split_strategy")
     if not all(left.get(key) is not None and left.get(key) == right.get(key) for key in required):
+        return False
+    if not execution_protocol_matches(left, right):
         return False
     if not allow_price_weighting and left.get("price_weighting", "none") != right.get("price_weighting", "none"):
         return False
@@ -315,7 +379,7 @@ SEARCH_N_JOBS = 1  # Keep parallel model copies from increasing peak memory.
 
 TARGET_COLUMN = "price"
 COHORT_COLUMNS = ("ModelYear", "Make", "Model", "Trim")
-PREPROCESSING_VERSION = "advertised-price-log-v3"
+PREPROCESSING_VERSION = "advertised-price-log-v4"
 OPTION_LABELS = {
     "option_navigation": "Navigation System", "option_leather": "Leather Seats",
     "option_heated_seats": "Heated Seats", "option_backup_camera": "Backup Camera",
@@ -325,7 +389,6 @@ OPTION_LABELS = {
 }
 DERIVED_FEATURE_COLUMNS = ("maximum_seating_numeric", "log1p_mileage", *OPTION_LABELS)
 
-# Listing features from used_cars plus deterministic listing-derived features.
 BASE_FEATURE_COLUMNS = (
     "engine_displacement", "engine_type", "exterior_color", "fuel_type",
     "horsepower", "interior_color", "is_new", "listing_color", "make_name",
@@ -335,8 +398,6 @@ BASE_FEATURE_COLUMNS = (
     "latitude", "longitude", "body_type", "city_fuel_economy", "highway_fuel_economy",
 ) + DERIVED_FEATURE_COLUMNS
 
-# General NHTSA vPIC fields requested in addition to the listing baseline.
-# Includes general, truck, and battery/electrification fields in ``enriched``.
 VPIC_FEATURE_COLUMNS = (
     "ABS", "AirBagLocCurtain", "AirBagLocFront", "AirBagLocSide",
     "AutoReverseSystem", "Axles", "BlindSpotMon", "BodyClass",
@@ -380,10 +441,51 @@ ENRICHED_FEATURE_COLUMNS = tuple(dict.fromkeys(
     + EV_HEV_FEATURE_COLUMNS + COMPLAINT_VALUE_FEATURES + RECALL_VALUE_FEATURES
     + COMPLAINT_COVERAGE_FEATURES + RECALL_COVERAGE_FEATURES + SAFETY_FEATURE_COLUMNS
 ))
+ENHANCED_FEATURE_COLUMNS = tuple(dict.fromkeys(
+    BASE_FEATURE_COLUMNS + VPIC_FEATURE_COLUMNS + TRUCK_FEATURE_COLUMNS + EV_HEV_FEATURE_COLUMNS
+))
+YOUTUBE_FEATURE_DIRECTORY = PROJECT_ROOT / "YOUTUBE/outputs/price_features_v1"
+YOUTUBE_ASPECTS = ("design", "performance", "comfort", "technology", "reliability",
+                   "maintenance_cost", "fuel_economy_range", "safety")
+YOUTUBE_FEATURE_COLUMNS = (
+    "yt_feature_row_present", "yt_comment_count", "yt_eligible_count", "yt_video_count",
+    "yt_support_suppressed", "yt_semantic_missing",
+    *[f"yt_{a}_topic_missing" for a in YOUTUBE_ASPECTS],
+    *[f"yt_semantic_{i:02d}" for i in range(1, 9)],
+    *[f"yt_{a}_mention_share" for a in YOUTUBE_ASPECTS],
+    *[f"yt_{a}_{suffix}" for a in ("comfort", "maintenance_cost", "performance", "reliability")
+      for suffix in ("video_balanced_net", "opinion_count", "opinion_video_count", "missing")],
+)
+PCR_COMPONENTS = 31
+PCR_PROTOCOL_VERSION = "full-numeric-pca31-v1"
+PCR_FLAG_COLUMNS = frozenset(OPTION_LABELS) | frozenset({
+    "complaint_source_records_present", "recall_source_records_present",
+    "yt_feature_row_present", "yt_support_suppressed", "yt_semantic_missing",
+    "doug_cohort_match_available", "doug_make_baseline_available",
+    *[f"yt_{a}_topic_missing" for a in YOUTUBE_ASPECTS],
+    *[f"yt_{a}_missing" for a in ("comfort", "maintenance_cost", "performance", "reliability")],
+})
+from EXPERT_REVIEWS.price_features import (
+    DEFAULT_DIRECTORY as EXPERT_FEATURE_DIRECTORY, FEATURE_COLUMNS as EXPERT_FEATURE_COLUMNS,
+    COVERAGE_COLUMNS as EXPERT_COVERAGE_COLUMNS, load_features as load_expert_features,
+    join_features as join_expert_features,
+)
+
+YOUTUBE_MODEL_TYPES = {"full", "full_youtube", "full_youtube_expert_coverage"}
+EXPERT_MODEL_TYPES = {"full", "enhanced_safety_expert", "enhanced_safety_expert_coverage", "full_youtube_expert_coverage"}
 MODEL_FEATURE_SETS = {
     "base": BASE_FEATURE_COLUMNS,
+    "enhanced": ENHANCED_FEATURE_COLUMNS,
+    "enhanced_safety": ENRICHED_FEATURE_COLUMNS,
+    "full_youtube": ENRICHED_FEATURE_COLUMNS + YOUTUBE_FEATURE_COLUMNS,
+    "enhanced_safety_expert": ENRICHED_FEATURE_COLUMNS + EXPERT_FEATURE_COLUMNS,
+    "enhanced_safety_expert_coverage": ENRICHED_FEATURE_COLUMNS + EXPERT_COVERAGE_COLUMNS,
+    "full_youtube_expert_coverage": ENRICHED_FEATURE_COLUMNS + YOUTUBE_FEATURE_COLUMNS + EXPERT_COVERAGE_COLUMNS,
+    "full": ENRICHED_FEATURE_COLUMNS + YOUTUBE_FEATURE_COLUMNS + EXPERT_FEATURE_COLUMNS,
     "enriched": ENRICHED_FEATURE_COLUMNS,
 }
+STRUCTURED_MODEL_TYPES = {"enriched", "enhanced_safety", *YOUTUBE_MODEL_TYPES, *EXPERT_MODEL_TYPES}
+
 
 
 def add_vehicle_subtype_flags(frame: pl.DataFrame) -> pl.DataFrame:
@@ -637,6 +739,7 @@ CLASSICAL_MODEL_NAMES = (
     "random_forest", "multiple_linear_regression", "lasso", "ridge", "elastic_net",
 )
 PILOT_MODEL_NAMES = TREE_MODEL_NAMES + CLASSICAL_MODEL_NAMES
+AVAILABLE_MODEL_NAMES = PILOT_MODEL_NAMES + ("pcr",)
 
 # Full-run CLI search ranges retained after the 50,000-listing base pilot.
 # Compare model complexity at fixed learning rate and regularization first,
@@ -692,6 +795,7 @@ CLASSICAL_PARAMETER_GRIDS: dict[str, dict[str, list[Any]]] = {
         "model__min_samples_leaf": [2, 3, 5],
     },
     "multiple_linear_regression": {},
+    "pcr": {"preprocess__components__n_components": [PCR_COMPONENTS]},
     "lasso": {"model__alpha": [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]},
     "ridge": {"model__alpha": [0.1, 1.0, 10.0, 100.0, 1000.0]},
     "elastic_net": {
@@ -720,7 +824,6 @@ PARAMETER_DISTRIBUTIONS: dict[str, Any] = {
 
 
 def iter_cleaned_batches() -> Iterator[tuple[str, pl.DataFrame]]:
-    """Yield saved CAR_DATA_FINAL tables as Polars batches without re-cleaning."""
     yield from load_final_data()
 
 
@@ -741,7 +844,6 @@ def prepare_training_data(
 
 
 def build_estimators() -> dict[str, Any]:
-    """Create the seven requested estimators with conservative parallelism."""
     from lightgbm import LGBMRegressor
     from sklearn.ensemble import RandomForestRegressor
     from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, Ridge
@@ -768,7 +870,6 @@ def build_searches(
     model_names: list[str] | None = None,
     iterations: int = SEARCH_ITERATIONS,
 ) -> dict[str, Any]:
-    """Build one randomized search per model once preprocessing and CV are set."""
     from sklearn.model_selection import RandomizedSearchCV
     from sklearn.pipeline import Pipeline
 
@@ -883,7 +984,6 @@ TREE_THREADS = 4
 
 
 def _validate_snapshot_columns(model_type: str) -> tuple[list[str], list[str]]:
-    """Return selected listing and vPIC columns, failing on stale feature names."""
     listing_schema = scan_final_table("used_cars").collect_schema().names()
     vpic_schema = scan_final_table("nhtsa_vpic_decodes").collect_schema().names()
     features = list(MODEL_FEATURE_SETS[model_type])
@@ -892,7 +992,9 @@ def _validate_snapshot_columns(model_type: str) -> tuple[list[str], list[str]]:
     missing = [column for column in features
                if column not in listing_schema and column not in vpic_schema
                and column not in DERIVED_FEATURE_COLUMNS
-               and column not in COMPLAINT_RECALL_FEATURE_COLUMNS]
+               and column not in COMPLAINT_RECALL_FEATURE_COLUMNS
+               and column not in YOUTUBE_FEATURE_COLUMNS
+               and column not in EXPERT_FEATURE_COLUMNS]
     missing += [c for c in ("major_options", "maximum_seating") if c not in listing_schema]
     if missing:
         raise ValueError(
@@ -983,6 +1085,7 @@ def _normalize_model_feature_strings(frame: pl.DataFrame,
 
 def load_model_frame(
     model_type: str, sample_size: int | None, *, issue_as_of: date | None = None,
+    expert_feature_dir: Path | None = None,
 ) -> tuple[pl.DataFrame, dict[str, Any]]:
     """Load only requested columns, VIN-join listings/vPIC, and optionally sample."""
     if model_type not in MODEL_FEATURE_SETS:
@@ -1033,7 +1136,7 @@ def load_model_frame(
     joined_rows = frame.height
     unmatched_vpic_rows = frame.filter(pl.col("_vpic_match").is_null()).height
     issue_feature_stats = None
-    if model_type == "enriched":
+    if model_type in STRUCTURED_MODEL_TYPES:
         feature_frame, issue_feature_stats = build_complaint_recall_features(
             as_of=issue_as_of or COMPLAINT_RECALL_AS_OF,
         )
@@ -1054,6 +1157,20 @@ def load_model_frame(
             pl.col("complaint_source_records_present").fill_null(0),
             pl.col("recall_source_records_present").fill_null(0),
         ).drop(["_feature_year", "_feature_make", "_feature_model"])
+    youtube_info = None
+    if model_type in YOUTUBE_MODEL_TYPES:
+        from NHTSA.text_features import load_youtube_features, join_youtube_features
+        youtube_frame, youtube_info = load_youtube_features(YOUTUBE_FEATURE_DIRECTORY)
+        if set(youtube_frame.columns) != {"Make", *YOUTUBE_FEATURE_COLUMNS}:
+            raise ValueError("Selected YouTube schema differs from the full variant")
+        frame = join_youtube_features(frame, youtube_frame)
+    expert_info = None
+    if model_type in EXPERT_MODEL_TYPES:
+        from EDA.DATA_CLEANING import FINAL_DATASET_PATH
+        cohorts, makes, expert_info = load_expert_features(
+            expert_feature_dir or EXPERT_FEATURE_DIRECTORY,
+            vpic_sha256=file_sha256(FINAL_DATASET_PATH / "NHTSA_vPIC.parquet"))
+        frame = join_expert_features(frame, cohorts, makes)
     if model_type.endswith("_truck"):
         frame = filter_vehicle_subtype(frame, "truck")
     elif model_type.endswith("_ev_hev"):
@@ -1076,14 +1193,17 @@ def load_model_frame(
         ((pl.col("price") < 500) | (pl.col("price") > 500_000))
         .fill_null(False).alias("price_review_flag"),
     )
-    selected = [*features, *COHORT_COLUMNS, TARGET_COLUMN, "_cohort_group", "vin", "cohort_complete",
-                "split_identity_source", "mileage_review_flag", "price_review_flag"]
+    selected = list(dict.fromkeys([*features, *COHORT_COLUMNS, TARGET_COLUMN, "_cohort_group", "vin", "cohort_complete",
+                "split_identity_source", "mileage_review_flag", "price_review_flag"]))
+    if expert_info:
+        selected = list(dict.fromkeys([*selected, *EXPERT_COVERAGE_COLUMNS]))
     result = frame.select(selected)
     info = {
         "joined_rows_before_price_and_subtype_filters": joined_rows,
         "listing_rows_without_vpic_match": unmatched_vpic_rows,
         "rows_removed_for_nonpositive_or_missing_price": invalid_price,
         "cohort_ratio_exclusion_vins": len(excluded_vins),
+        "manual_excluded_vins": sorted(EXCLUDED_LISTING_VINS),
         "rows_after_filters": result.height,
         "requested_sample_size": sample_size,
         "sampled_listing_count_before_join": sampled_listing_count,
@@ -1093,22 +1213,28 @@ def load_model_frame(
         "complete_cohort_rows": result["cohort_complete"].sum(),
         "incomplete_cohort_rows": result.height - result["cohort_complete"].sum(),
         "split_identity_counts": result.group_by("split_identity_source").len().to_dicts(),
-        "extreme_value_policy": "exclude null mileage and review-file VINs with price/cohort-median ratio >2 or <=0.75, or mileage/cohort-median ratio >20; no absolute price/mileage bounds",
+        "extreme_value_policy": "exclude null mileage, six manually reviewed VINs, and review-file VINs with price/cohort-median ratio >2 or <=0.75, or mileage/cohort-median ratio >20; no absolute price/mileage bounds",
         "review_flag_counts": {c: result[c].sum() for c in ("mileage_review_flag", "price_review_flag")},
         "feature_columns": features,
         "listing_feature_columns": listing_features,
         "vpic_feature_columns": vpic_features,
     }
-    if model_type == "enriched":
+    if model_type in STRUCTURED_MODEL_TYPES:
         info["complaint_recall_feature_build"] = issue_feature_stats
         info["complaint_recall_coverage"] = {
             c: frame[c].value_counts().to_dicts()
             for c in ("complaint_source_records_present", "recall_source_records_present")
         }
+    if youtube_info:
+        info["youtube_features"] = youtube_info
+    if expert_info:
+        info["expert_features"] = expert_info
+        info["expert_listing_coverage"] = result.group_by("doug_source_level").len().sort("doug_source_level").to_dicts()
     return result, info
 
 
-def prepare_prediction_frame(model_type: str, listings: pl.DataFrame) -> pl.DataFrame:
+def prepare_prediction_frame(model_type: str, listings: pl.DataFrame, *,
+                             expert_feature_dir: Path | None = None) -> pl.DataFrame:
     """Assemble model inputs from listing rows without requiring a price label.
 
     Rows join to the saved vPIC snapshot on lowercase ``vin``. Missing source
@@ -1148,7 +1274,7 @@ def prepare_prediction_frame(model_type: str, listings: pl.DataFrame) -> pl.Data
             .filter(pl.col("vin").is_in(vins)).collect())
     frame = frame.join(vpic, on="vin", how="left", validate="m:1", maintain_order="left")
 
-    if model_type == "enriched":
+    if model_type in STRUCTURED_MODEL_TYPES:
         feature_frame, _ = build_complaint_recall_features()
         frame = frame.with_columns(
             pl.col("ModelYear").cast(pl.Int64, strict=False).alias("_feature_year"),
@@ -1166,6 +1292,15 @@ def prepare_prediction_frame(model_type: str, listings: pl.DataFrame) -> pl.Data
             pl.col("recall_source_records_present").fill_null(0),
         ).drop(["_feature_year", "_feature_make", "_feature_model"])
 
+    if model_type in YOUTUBE_MODEL_TYPES:
+        from NHTSA.text_features import load_youtube_features, join_youtube_features
+        youtube_frame, _ = load_youtube_features(YOUTUBE_FEATURE_DIRECTORY)
+        frame = join_youtube_features(frame, youtube_frame)
+    if model_type in EXPERT_MODEL_TYPES:
+        from EDA.DATA_CLEANING import FINAL_DATASET_PATH
+        cohorts, makes, _ = load_expert_features(expert_feature_dir or EXPERT_FEATURE_DIRECTORY,
+            vpic_sha256=file_sha256(FINAL_DATASET_PATH / "NHTSA_vPIC.parquet"))
+        frame = join_expert_features(frame, cohorts, makes)
     frame = _normalize_model_feature_strings(
         add_listing_features(add_cohort_groups(frame)), model_features
     )
@@ -1174,16 +1309,82 @@ def prepare_prediction_frame(model_type: str, listings: pl.DataFrame) -> pl.Data
 
 
 def predict_listings(model_type: str, predictor_path: Path,
-                     listings: pl.DataFrame) -> pl.DataFrame:
+                     listings: pl.DataFrame, *, expert_feature_dir: Path | None = None) -> pl.DataFrame:
     """Score listing rows and return VIN, decoded identity, scope, and USD price."""
     import joblib
 
-    frame = prepare_prediction_frame(model_type, listings)
     predictor = joblib.load(predictor_path)
+    saved_features = getattr(predictor, "raw_feature_columns_", None)
+    if saved_features is None and hasattr(predictor, "named_steps") and "input" in predictor.named_steps:
+        preprocessor = predictor.named_steps["input"]
+        saved_features = [*preprocessor.categorical_columns, *preprocessor.numeric_columns]
+    if saved_features is not None and set(saved_features) != set(MODEL_FEATURE_SETS[model_type]):
+        raise ValueError("Saved predictor feature definition differs from the requested variant; "
+                         "use full_youtube for legacy full predictors or retrain full with expert features")
+    if model_type in EXPERT_MODEL_TYPES:
+        saved = getattr(predictor, "expert_feature_info_", None)
+        if not saved:
+            raise ValueError("Expert predictor lacks saved feature provenance; retrain this variant")
+        expert_feature_dir = expert_feature_dir or Path(saved["directory"])
+        _, _, current = load_expert_features(expert_feature_dir)
+        if current["manifest_sha256"] != saved["manifest_sha256"]:
+            raise ValueError("DougScore snapshot differs from the fitted predictor; use its saved expert directory")
+    frame = prepare_prediction_frame(model_type, listings, expert_feature_dir=expert_feature_dir)
     predictions = predictor.predict(frame.select(MODEL_FEATURE_SETS[model_type]).to_pandas())
     return frame.select(["vin", *COHORT_COLUMNS, "is_new"]).with_columns(
         pl.Series("predicted_price_usd", predictions)
     )
+
+
+def split_stratified_cohorts(frame: Any) -> tuple[Any, Any, Any, Any, Any, Any]:
+    """Keep decoded Y/M/M cohorts with >=25 VINs; split each 60/20/20.
+
+    Eligibility is evaluated on the loaded, filtered population (including any
+    requested pilot sample). Trim is deliberately pooled within each stratum.
+    """
+    import numpy as np
+    import pandas as pd
+
+    if frame["vin"].isna().any() or frame["vin"].duplicated().any():
+        raise ValueError("Cohort stratification requires unique, nonmissing VINs")
+    keys = frame[list(COHORT_COLUMNS[:3])].copy()
+    for column in ("Make", "Model"):
+        keys[column] = (keys[column].astype("string").str.strip()
+                        .str.replace(r"\s+", " ", regex=True).str.upper().replace("", pd.NA))
+    assignments = np.full(len(frame), "excluded", dtype=object)
+    vin_order = [hashlib.sha256(f"{RANDOM_SEED}:{vin}".encode()).digest()
+                 for vin in frame["vin"]]
+    audit = []
+    for identity, positions in keys.groupby(list(keys.columns), dropna=False, sort=True).indices.items():
+        count = len(positions)
+        reason = ("missing_decoded_identity" if any(pd.isna(v) for v in identity)
+                  else "fewer_than_25_vins" if count < 25 else "retained")
+        holdout = count // 5 if reason == "retained" else 0
+        fit_count = count - 2 * holdout if reason == "retained" else 0
+        audit.append(dict(zip(keys.columns, identity), eligible_vins=count, status=reason,
+                          fit_vins=fit_count, validation_vins=holdout, test_vins=holdout))
+        if reason != "retained":
+            continue
+        # VIN hashing makes membership independent of source row/group order.
+        ordered = sorted(positions, key=lambda i: vin_order[i])
+        assignments[ordered[:holdout]] = "test"
+        assignments[ordered[holdout:2 * holdout]] = "validation"
+        assignments[ordered[2 * holdout:]] = "fit"
+    retained = assignments != "excluded"
+    if not retained.any():
+        raise ValueError("No decoded year/make/model cohort has at least 25 eligible VINs")
+    filtered = frame.loc[retained].reset_index(drop=True)
+    partitions = assignments[retained]
+    indices = [np.flatnonzero(partitions == name) for name in ("fit", "validation", "test")]
+    details = {"minimum_cohort_vins": 25, "cohort_columns": list(keys.columns),
+               "fractions": {"fit": 0.6, "validation": 0.2, "test": 0.2},
+               "rounding": "floor(n/5) each for validation/test; remainder for fit",
+               "eligibility_population": "loaded filtered rows after optional VIN-hash sampling",
+               "input_rows": len(frame), "retained_rows": len(filtered),
+               "excluded_rows": int((~retained).sum()),
+               "retained_cohorts": sum(row["status"] == "retained" for row in audit),
+               "early_stopping_validation_available": True}
+    return filtered, *indices, details, pd.DataFrame(audit)
 
 
 def split_by_vehicle_cohort(
@@ -1236,12 +1437,78 @@ def split_by_vehicle_cohort(
     }
 
 
+def resolve_training_devices(model_names: list[str], device: str = "auto") -> dict[str, Any]:
+    """Probe actual GPU training; record explicit CPU fallbacks in auto mode."""
+    if device not in {"auto", "cpu", "gpu"}:
+        raise ValueError("device must be auto, cpu, or gpu")
+    probe_x = pd.DataFrame({"value": np.arange(256, dtype=float),
+                            "kind": pd.Categorical(["A", "B"] * 128)})
+    probe_y = np.log1p(probe_x.value.to_numpy())
+    result = {}
+    for name in model_names:
+        backend, reason = "cpu", "Current sklearn sparse/one-hot pipeline runs on CPU"
+        if name in TREE_MODEL_NAMES:
+            reason = "CPU explicitly requested"
+            if device != "cpu":
+                try:
+                    model = _make_tree_model(name, 2, early_stopping=False, device="gpu")
+                    with warnings.catch_warnings(record=True) as caught:
+                        model.fit(probe_x, probe_y, **({"cat_features": ["kind"]} if name == "catboost" else {}))
+                    if name == "xgboost":
+                        config = json.loads(model.get_booster().save_config())
+                        if not config["learner"]["generic_param"]["device"].startswith("cuda"):
+                            raise RuntimeError("XGBoost fell back to CPU")
+                    backend, reason = "gpu", "GPU training probe passed"
+                except Exception as exc:
+                    reason = f"GPU unavailable: {exc}"
+                    if device == "gpu":
+                        raise RuntimeError(f"{name}: {reason}; use --device auto for explicit CPU fallback") from exc
+        result[name] = {"device": backend, "reason": reason}
+        print(f"{name}: {backend.upper()} ({reason})", flush=True)
+    return result
+
+
+def cohort_covered_sample(index: Any, groups: Any, target_rows: int,
+                          minimum_per_cohort: int, vins: Any) -> tuple[Any, dict[str, Any]]:
+    """Target-independent, reproducible quotas with support for every cohort."""
+    index = np.asarray(index, dtype=int)
+    if not len(index):
+        return index, {"rows": 0, "cohorts": 0}
+    blocks = pd.Series(index).groupby(np.asarray(groups)[index], sort=True)
+    members = [part.to_numpy() for _, part in blocks]
+    sizes = np.array([len(part) for part in members])
+    quotas = np.minimum(sizes, minimum_per_cohort)
+    budget = min(len(index), max(target_rows, int(quotas.sum())))
+    # Allocate remaining capacity proportionally, with largest-remainder rounding.
+    capacity = sizes - quotas
+    if capacity.sum():
+        extra = (budget - quotas.sum()) * capacity / capacity.sum()
+        allocated = np.floor(extra).astype(int)
+        remaining = budget - int(quotas.sum() + allocated.sum())
+        order = np.argsort(-(extra - allocated), kind="stable")
+        allocated[order[:remaining]] += 1
+        quotas += allocated
+    vin_values = np.asarray(vins)
+    selected = []
+    for part, count in zip(members, quotas):
+        ordered = sorted(part, key=lambda i: hashlib.sha256(
+            f"tuning:{RANDOM_SEED}:{vin_values[i]}".encode()).digest())
+        selected.extend(ordered[:count])
+    return np.sort(np.asarray(selected, dtype=int)), {
+        "version": "cohort_quotas_v1", "target_rows": target_rows, "rows": budget,
+        "cohorts": len(members), "minimum_per_cohort": minimum_per_cohort,
+        "actual_minimum_per_cohort": int(quotas.min()),
+        "expanded_for_coverage": budget > target_rows,
+        "allocation": "minimum support then proportional remaining capacity; VIN hash within cohort"}
+
+
 def _make_tree_model(
     name: str,
     iterations: int,
     *,
     early_stopping: bool = True,
     parameters: dict[str, Any] | None = None,
+    device: str = "cpu",
 ) -> Any:
     parameters = parameters or {}
     if name == "catboost":
@@ -1256,6 +1523,8 @@ def _make_tree_model(
             learning_rate=parameters.get("learning_rate", 0.05),
             loss_function="MAE", eval_metric="MAE", random_seed=RANDOM_SEED,
             thread_count=TREE_THREADS, allow_writing_files=False, verbose=False,
+            **({"task_type": "GPU", "devices": "0", "gpu_ram_part": 0.70,
+                "pinned_memory_size": "256mb"} if device == "gpu" else {"task_type": "CPU"}),
             **extra_parameters,
         )
     if name == "lightgbm":
@@ -1271,6 +1540,8 @@ def _make_tree_model(
             num_leaves=parameters.get("num_leaves", 31), max_depth=-1,
             min_child_samples=parameters.get("min_child_samples", 100), n_jobs=TREE_THREADS,
             random_state=RANDOM_SEED, verbosity=-1,
+            **({"device_type": "gpu", "gpu_device_id": 0, "max_bin": 63}
+               if device == "gpu" else {"device_type": "cpu"}),
             **extra_parameters,
         )
     if name == "xgboost":
@@ -1290,6 +1561,7 @@ def _make_tree_model(
             subsample=parameters.get("subsample", 0.8),
             colsample_bytree=parameters.get("colsample_bytree", 0.8), tree_method="hist",
             enable_categorical=True, n_jobs=TREE_THREADS,
+            device="cuda:0" if device == "gpu" else "cpu",
             random_state=RANDOM_SEED,
             **({"early_stopping_rounds": TREE_EARLY_STOPPING_ROUNDS} if early_stopping else {}),
             **extra_parameters,
@@ -1308,6 +1580,8 @@ def _fit_with_early_stopping(
     diagnostics: list[dict[str, Any]] | None = None,
     sample_weight: Any = None,
     selected_evaluation: dict[str, Any] | None = None,
+    progress=None,
+    device: str = "cpu",
 ) -> tuple[int, float, dict[str, Any], bool]:
     from sklearn.metrics import mean_absolute_error
     import numpy as np
@@ -1318,43 +1592,61 @@ def _fit_with_early_stopping(
 
     def evaluate(parameters: dict[str, Any], stage: str) -> None:
         nonlocal best, cap_limited_count
-        model = _make_tree_model(name, max_trees, parameters=parameters)
-        if name == "catboost":
-            from catboost import Pool
+        started = time.perf_counter()
+        logging.getLogger(__name__).info("Tuning %s %s: %s", name, stage, parameters)
+        budget = max_trees or PILOT_MAX_TREES
+        attempts = []
+        while True:
+            model = _make_tree_model(name, budget, parameters=parameters, device=device)
+            if name == "catboost":
+                from catboost import Pool
 
-            model.fit(
-                x_fit, y_fit, cat_features=categorical_columns,
-                sample_weight=sample_weight,
-                eval_set=Pool(x_validation, y_validation, cat_features=categorical_columns),
-                early_stopping_rounds=TREE_EARLY_STOPPING_ROUNDS, verbose=False,
-            )
-            best_iteration = model.best_iteration_
-            iterations = int(best_iteration + 1) if best_iteration is not None and best_iteration >= 0 \
-                else max(1, int(model.tree_count_))
-        elif name == "lightgbm":
-            import lightgbm as lgb
+                model.fit(
+                    x_fit, y_fit, cat_features=categorical_columns,
+                    sample_weight=sample_weight,
+                    eval_set=Pool(x_validation, y_validation, cat_features=categorical_columns),
+                    early_stopping_rounds=TREE_EARLY_STOPPING_ROUNDS, verbose=False,
+                )
+                best_iteration = model.best_iteration_
+                iterations = int(best_iteration + 1) if best_iteration is not None and best_iteration >= 0 \
+                    else max(1, int(model.tree_count_))
+            elif name == "lightgbm":
+                import lightgbm as lgb
 
-            model.fit(
-                x_fit, y_fit, categorical_feature=categorical_columns,
-                sample_weight=sample_weight,
-                eval_X=x_validation, eval_y=y_validation, eval_metric="l1",
-                callbacks=[lgb.early_stopping(TREE_EARLY_STOPPING_ROUNDS, verbose=False)],
-            )
-            iterations = max(1, int(model.best_iteration_ or model.n_estimators))
-        else:
-            model.fit(x_fit, y_fit, sample_weight=sample_weight,
-                      eval_set=[(x_validation, y_validation)], verbose=False)
-            iterations = max(1, int(model.best_iteration + 1))
-        predicted = np.exp(model.predict(x_validation))
-        scores = validation_metrics(actual_prices, predicted)
-        score = scores["validation_mae"]
-        history = model.evals_result_ if name != "xgboost" else model.evals_result()
-        validation_key = {"catboost": "validation", "lightgbm": "valid_0",
-                          "xgboost": "validation_0"}[name]
-        rounds_trained = len(next(iter(history[validation_key].values())))
-        rounds_after_best = rounds_trained - iterations
-        cap_limited = (rounds_trained >= max_trees
-                       and rounds_after_best < TREE_EARLY_STOPPING_ROUNDS)
+                model.fit(
+                    x_fit, y_fit, categorical_feature=categorical_columns,
+                    sample_weight=sample_weight,
+                    eval_X=x_validation, eval_y=y_validation, eval_metric="l1",
+                    callbacks=[lgb.early_stopping(TREE_EARLY_STOPPING_ROUNDS, verbose=False)],
+                )
+                iterations = max(1, int(model.best_iteration_ or model.n_estimators))
+            else:
+                model.fit(x_fit, y_fit, sample_weight=sample_weight,
+                          eval_set=[(x_validation, y_validation)], verbose=False)
+                iterations = max(1, int(model.best_iteration + 1))
+            predicted = np.exp(model.predict(x_validation))
+            scores = validation_metrics(actual_prices, predicted)
+            score = scores["validation_mae"]
+            history = model.evals_result_ if name != "xgboost" else model.evals_result()
+            validation_key = {"catboost": "validation", "lightgbm": "valid_0",
+                              "xgboost": "validation_0"}[name]
+            rounds_trained = len(next(iter(history[validation_key].values())))
+            rounds_after_best = rounds_trained - iterations
+            cap_limited = (rounds_trained >= budget
+                           and rounds_after_best < TREE_EARLY_STOPPING_ROUNDS)
+            attempts.append({"budget": budget, "rounds_trained": rounds_trained,
+                             "best_iteration": iterations, "cap_reached": cap_limited})
+            if max_trees or not cap_limited:
+                break
+            logging.getLogger(__name__).info("%s still improving at %s trees; retrying with %s",
+                                             name, budget, budget * 2)
+            if diagnostics is not None:
+                diagnostics.append({"model": name, "stage": stage, "parameters": parameters,
+                                    "phase": "expand_tree_budget", "attempt": attempts[-1]})
+            if progress:
+                progress()
+            del model
+            budget *= 2
         cap_limited_count += cap_limited
         if diagnostics is not None:
             diagnostics.append({"model": name, "stage": stage, "parameters": parameters,
@@ -1363,7 +1655,13 @@ def _fit_with_early_stopping(
                                 "rounds_after_best": rounds_after_best,
                                 "early_stopping_rounds": TREE_EARLY_STOPPING_ROUNDS,
                                 "tree_cap_reached": cap_limited,
-                                "learning_curve": history})
+                                "learning_curve": history, "budget_attempts": attempts, "device": device})
+        elapsed = time.perf_counter() - started
+        if diagnostics is not None:
+            diagnostics[-1]["elapsed_seconds"] = elapsed
+        logging.getLogger(__name__).info("Tuned %s %s in %.1fs; validation MAE %.2f", name, stage, elapsed, score)
+        if progress:
+            progress()
         if best is None or score < best[0]:
             best = (score, iterations, parameters, cap_limited)
             if selected_evaluation is not None:
@@ -1407,6 +1705,17 @@ def _make_classical_pipeline(
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+    if name == "pcr":
+        measurements = [c for c in numeric_columns if c not in PCR_FLAG_COLUMNS and not c.endswith("__missing")]
+        retained_flags = [c for c in numeric_columns if c not in measurements]
+        preprocessor = ColumnTransformer([
+            ("components", FixedNumericPCA(PCR_COMPONENTS), measurements),
+            ("numeric", StandardScaler(), retained_flags),
+            ("categorical", OneHotEncoder(handle_unknown="ignore", min_frequency=20,
+                                           sparse_output=True), categorical_columns),
+        ], remainder="drop", sparse_threshold=1.0)
+        return Pipeline([("preprocess", preprocessor), ("model", LinearRegression())])
+
     scale_numeric = name != "random_forest"
     numeric_steps = [("scale", StandardScaler())] if scale_numeric else []
     numeric_pipeline = Pipeline(numeric_steps) if numeric_steps else "passthrough"
@@ -1436,6 +1745,35 @@ def _make_classical_pipeline(
     return Pipeline([("preprocess", preprocessor), ("model", estimators[name])])
 
 
+def _fit_adaptive_forest(candidate: Any, x_fit: Any, y_fit: Any, x_validation: Any,
+                         y_validation: Any, sample_weight: Any, diagnostics: Any,
+                         progress: Any) -> int:
+    """Grow 100-tree batches until three fail to improve USD MAE by 0.1%."""
+    transformer, forest = candidate.named_steps["preprocess"], candidate.named_steps["model"]
+    fit_values = transformer.fit_transform(x_fit)
+    validation_values = transformer.transform(x_validation)
+    forest.set_params(warm_start=True, n_estimators=100)
+    best_score, best_count, stale = float("inf"), 0, 0
+    while stale < 3:
+        forest.fit(fit_values, y_fit, sample_weight=sample_weight)
+        score = float(mean_absolute_error(np.exp(y_validation), np.exp(forest.predict(validation_values))))
+        meaningful = score < best_score * 0.999
+        if meaningful:
+            best_score, best_count, stale = score, forest.n_estimators, 0
+        else:
+            stale += 1
+        if diagnostics is not None:
+            diagnostics.append({"model": "random_forest", "phase": "tree_growth",
+                                "trees": forest.n_estimators, "validation_mae": score,
+                                "plateau_batches": stale})
+        if progress:
+            progress()
+        forest.n_estimators += 100
+    forest.estimators_ = forest.estimators_[:best_count]
+    forest.set_params(n_estimators=best_count, warm_start=False)
+    return best_count
+
+
 def _fit_classical_model(
     name: str,
     x_fit: Any,
@@ -1447,6 +1785,8 @@ def _fit_classical_model(
     diagnostics: list[dict[str, Any]] | None = None,
     sample_weight: Any = None,
     selected_evaluation: dict[str, Any] | None = None,
+    progress=None,
+    unlimited_trees: bool = False,
 ) -> tuple[Any, dict[str, Any], float | None]:
     """Tune classical estimators on validation cohorts and refit on outer train."""
     from sklearn.metrics import mean_absolute_error
@@ -1460,12 +1800,19 @@ def _fit_classical_model(
     best_score: float | None = None
     if x_validation is not None:
         for params in candidates:
+            started = time.perf_counter()
+            logging.getLogger(__name__).info("Tuning %s: %s", name, params)
             candidate = _make_classical_pipeline(
                 name, categorical_columns, numeric_columns
             ).set_params(**params)
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always", ConvergenceWarning)
-                candidate.fit(x_fit, y_fit, model__sample_weight=sample_weight)
+                if name == "random_forest" and unlimited_trees:
+                    count = _fit_adaptive_forest(candidate, x_fit, y_fit, x_validation,
+                                                 y_validation, sample_weight, diagnostics, progress)
+                    params = {**params, "model__n_estimators": count}
+                else:
+                    candidate.fit(x_fit, y_fit, model__sample_weight=sample_weight)
             converged = not any(issubclass(w.category, ConvergenceWarning) for w in caught)
             predicted = np.exp(candidate.predict(x_validation))
             scores = validation_metrics(np.exp(y_validation), predicted)
@@ -1473,6 +1820,12 @@ def _fit_classical_model(
             if diagnostics is not None:
                 diagnostics.append({"model": name, "parameters": params, **scores,
                                     "converged": converged, "warnings": [str(w.message) for w in caught]})
+            elapsed = time.perf_counter() - started
+            if diagnostics is not None:
+                diagnostics[-1]["elapsed_seconds"] = elapsed
+            logging.getLogger(__name__).info("Tuned %s in %.1fs; validation MAE %.2f", name, elapsed, score)
+            if progress:
+                progress()
             if converged and (best_score is None or score < best_score):
                 pipeline, best_params, best_score = candidate, params, score
                 if selected_evaluation is not None:
@@ -1567,16 +1920,20 @@ def run_price_model_pilot(
     model_type: str = "base",
     sample_size: int | None = 100_000,
     model_names: list[str] | None = None,
-    shap_rows: int = 1_000,
+    shap_rows: int = 0,
     tuning_rows: int = 100_000,
     max_trees: int = PILOT_MAX_TREES,
-    split_strategy: str = "unseen_family",
+    split_strategy: str = "cohort_stratified",
     price_weighting: str = "none",
+    expert_feature_dir: Path | None = None,
+    evaluate_test: bool = True,
+    device: str = "auto",
+    full_validation: bool = False,
 ) -> Path:
     """Select on validation data, refit on outer training, report untouched tests.
 
     All listings predict advertised listing price, with ``is_new`` retained as
-    a predictor and a reported segment. Full-data mode holds test groups out.
+    a predictor and a reported segment. Test VINs stay outside model fitting.
     """
     import gc
     import joblib
@@ -1588,16 +1945,21 @@ def run_price_model_pilot(
     from sklearn.pipeline import Pipeline
     from EDA.DATA_CLEANING import FINAL_DATASET_PATH
 
+    run_started = time.perf_counter()
+    print(f"Preparing {model_type} inputs and source fingerprints...", flush=True)
     model_names = model_names or list(PILOT_MODEL_NAMES)
-    unknown = sorted(set(model_names) - set(PILOT_MODEL_NAMES))
+    unknown = sorted(set(model_names) - set(AVAILABLE_MODEL_NAMES))
     if unknown:
         raise ValueError("Unsupported models: " + ", ".join(unknown))
     if len(set(model_names)) != len(model_names):
         raise ValueError("Model names must be unique")
-    if tuning_rows <= 0 or max_trees <= 0:
-        raise ValueError("tuning_rows and max_trees must be positive")
-    if split_strategy not in {"unseen_family", "known_family"}:
-        raise ValueError("split_strategy must be 'unseen_family' or 'known_family'")
+    if "pcr" in model_names and model_type != "full":
+        raise ValueError("PCR uses only --model-type full with 31 numerical components")
+    if tuning_rows <= 0 or max_trees < 0:
+        raise ValueError("tuning_rows must be positive; max_trees must be zero or positive")
+    if split_strategy not in {"cohort_stratified", "unseen_family", "known_family"}:
+        raise ValueError("Unknown split_strategy: " + split_strategy)
+    training_devices = resolve_training_devices(model_names, device)
 
     # Fingerprint the same documented Parquet inputs for every feature set so
     # notebook comparisons can verify a shared data snapshot.
@@ -1605,27 +1967,45 @@ def run_price_model_pilot(
         "used_cars.parquet", "NHTSA_vPIC.parquet",
         "NHTSA_Complaints.parquet", "NHTSA_Recalls.parquet", "NHTSA_Safety.parquet",
     )]
+    if model_type in YOUTUBE_MODEL_TYPES:
+        source_paths += [YOUTUBE_FEATURE_DIRECTORY / "make_features.parquet",
+                         YOUTUBE_FEATURE_DIRECTORY / "price_feature_manifest.json"]
+    if model_type in EXPERT_MODEL_TYPES:
+        _, _, expert_source = load_expert_features(expert_feature_dir or EXPERT_FEATURE_DIRECTORY,
+            vpic_sha256=file_sha256(FINAL_DATASET_PATH / "NHTSA_vPIC.parquet"))
+        source_paths += [Path(expert_source["directory"]) / n for n in (
+            "cohort_features.parquet", "make_features.parquet", "expert_feature_manifest.json", "review_resolution.parquet")]
     source_stats = {str(p): (p.stat().st_size, p.stat().st_mtime_ns) for p in source_paths}
-    source_hashes = {p.name: file_sha256(p) for p in source_paths}
+    source_hashes = {(f"expert/{p.name}" if model_type in EXPERT_MODEL_TYPES and p.parent == Path(expert_source["directory"]) else p.name):
+                     file_sha256(p) for p in source_paths}
     dataset_fingerprint = hashlib.sha256(json.dumps(source_hashes, sort_keys=True).encode()).hexdigest()
-    code_hashes = {"Price_ML_Models.py": file_sha256(Path(__file__))}
+    code_hashes = {name: file_sha256(PROJECT_ROOT / name) for name in (
+        "MODELS/Price_ML_Models.py", "EDA/DATA_CLEANING.py", "NHTSA/text_features.py", "EXPERT_REVIEWS/price_features.py",
+    )}
     code_fingerprint = hashlib.sha256(json.dumps(code_hashes, sort_keys=True).encode()).hexdigest()
     package_versions = {p: importlib.metadata.version(p) for p in
                         ("polars", "pandas", "numpy", "scikit-learn", "catboost", "lightgbm", "xgboost", "pyarrow")}
 
-    polars_frame, data_info = load_model_frame(model_type, sample_size)
+    load_options = {"expert_feature_dir": expert_feature_dir} if model_type in EXPERT_MODEL_TYPES else {}
+    polars_frame, data_info = load_model_frame(model_type, sample_size, **load_options)
     if any((p.stat().st_size, p.stat().st_mtime_ns) != source_stats[str(p)] for p in source_paths):
         raise RuntimeError("Source snapshot changed during loading; retry against a stable export")
     raw_features = data_info["feature_columns"]
     categorical_columns = [c for c in raw_features if polars_frame.schema[c] == pl.String]
-    raw_numeric_columns = [c for c in raw_features if polars_frame.schema[c].is_numeric()]
+    raw_numeric_columns = [c for c in raw_features if c not in categorical_columns]
     frame = polars_frame.to_pandas()
     del polars_frame
+    cohort_split_audit = None
+    if split_strategy == "cohort_stratified":
+        frame, fit_index, validation_index, test_index, split_info, cohort_split_audit = split_stratified_cohorts(frame)
     family_groups = frame["_cohort_group"].to_numpy()
-    groups = family_groups if split_strategy == "unseen_family" else frame["vin"].to_numpy()
+    groups = frame["vin"].to_numpy() if split_strategy == "known_family" else family_groups
     y = frame[TARGET_COLUMN].to_numpy(dtype=float)
     y_log = np.log(y)
-    fit_index, validation_index, test_index, split_info = split_by_vehicle_cohort(groups)
+    if split_strategy != "cohort_stratified":
+        fit_index, validation_index, test_index, split_info = split_by_vehicle_cohort(groups)
+    if (full_validation or max_trees == 0) and not len(validation_index):
+        raise ValueError("Full validation and unlimited tree search require a validation partition")
     outer_train_index = np.sort(np.concatenate([fit_index, validation_index]))
 
     # Keep evaluation/split identities and raw decoded dimensions apart from
@@ -1633,6 +2013,7 @@ def run_price_model_pilot(
     receipt_columns = ["vin", *COHORT_COLUMNS, "make_name", "is_new", "mileage", "cohort_complete", "split_identity_source",
                        "mileage_review_flag", "price_review_flag",
                        *[c for c in ("complaint_source_records_present", "recall_source_records_present") if c in frame.columns]]
+    receipt_columns += [c for c in EXPERT_COVERAGE_COLUMNS if c in frame.columns]
     manifest = frame[receipt_columns].copy()
     manifest["split_group"] = groups
     manifest["family_block"] = family_groups
@@ -1645,17 +2026,21 @@ def run_price_model_pilot(
 
     # Bounded, target-independent tuning samples. Vocabulary/imputation fit
     # only on the chosen fit rows; validation remains transform-only.
-    rng = np.random.default_rng(RANDOM_SEED)
-    def bounded(index):
-        return np.sort(rng.choice(index, min(tuning_rows, len(index)), replace=False))
-    tune_fit_index = bounded(fit_index)
-    tune_validation_index = bounded(validation_index)
+    tune_fit_index, fit_sample_info = cohort_covered_sample(
+        fit_index, family_groups, tuning_rows, 20, manifest.vin)
+    tune_validation_index, validation_sample_info = cohort_covered_sample(
+        validation_index, family_groups, tuning_rows, 5, manifest.vin)
     tune_weights = training_price_weights(y[tune_fit_index], price_weighting)
     final_weights = training_price_weights(y[outer_train_index], price_weighting)
     tune_preprocessor = PricePreprocessor(categorical_columns, raw_numeric_columns)
     x_fit = tune_preprocessor.fit_transform(x.iloc[tune_fit_index])
     x_validation = (tune_preprocessor.transform(x.iloc[tune_validation_index])
                     if len(tune_validation_index) else None)
+    if full_validation:
+        validation_preprocessor = PricePreprocessor(categorical_columns, raw_numeric_columns)
+        x_full_fit = validation_preprocessor.fit_transform(x.iloc[fit_index])
+        x_full_validation = validation_preprocessor.transform(x.iloc[validation_index])
+    evaluation_validation_index = validation_index if full_validation else tune_validation_index
     final_preprocessor = PricePreprocessor(categorical_columns, raw_numeric_columns)
     x_train = final_preprocessor.fit_transform(x.iloc[outer_train_index])
     x_test = final_preprocessor.transform(x.iloc[test_index])
@@ -1669,21 +2054,60 @@ def run_price_model_pilot(
         + (f"-pilot-{sample_size}" if sample_size else "-full")
     )
     output_dir.mkdir(parents=True, exist_ok=False)
+    if cohort_split_audit is not None:
+        cohort_split_audit.to_csv(output_dir / "cohort_split_audit.csv", index=False)
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    file_handler = logging.FileHandler(output_dir / "run.log", encoding="utf-8")
+    console_handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    for handler in (file_handler, console_handler):
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    logger.info("Run %s; %s listings; %s models; preparation %.1fs", model_type, len(y), len(model_names), time.perf_counter() - run_started)
+    timings = []
+    @contextmanager
+    def stage(model, phase):
+        started = time.perf_counter()
+        logger.info("Starting %s / %s", model, phase)
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - started
+            timings.append({"model": model, "stage": phase, "elapsed_seconds": elapsed})
+            logger.info("Finished %s / %s in %.1fs", model, phase, elapsed)
+            pd.DataFrame(timings).to_csv(output_dir / "timings.csv", index=False)
     manifest.to_parquet(output_dir / "split_manifest.parquet", index=False)
+    tuning_manifest = manifest.iloc[np.sort(np.concatenate([tune_fit_index, tune_validation_index]))].copy()
+    tuning_manifest.to_parquet(output_dir / "tuning_manifest.parquet", index=False)
+    tuning_hash = split_fingerprint(tuning_manifest)
     flagged = manifest[manifest["mileage_review_flag"] | manifest["price_review_flag"]].copy()
     flagged["actual_price"] = y[flagged.index]
-    # Mileage itself remains a predictor in the source; flags are audit-only.
     flagged.to_parquet(output_dir / "extreme_value_review.parquet", index=False)
     test_receipt = manifest.iloc[test_index].copy().reset_index(drop=True)
     test_receipt["actual_price"] = y[test_index]
-    validation_receipt = manifest.iloc[tune_validation_index].copy().reset_index(drop=True)
-    validation_receipt["actual_price"] = y[tune_validation_index]
+    validation_receipt = manifest.iloc[evaluation_validation_index].copy().reset_index(drop=True)
+    validation_receipt["actual_price"] = y[evaluation_validation_index]
+    all_makes = sorted(manifest["Make"].dropna().unique())
     del manifest, flagged
+    explanation_count = min(1000, len(x_test))
+    explanation_positions = np.sort(np.random.default_rng(RANDOM_SEED).choice(len(x_test), explanation_count, replace=False))
+    x_test.iloc[explanation_positions].reset_index(drop=True).to_parquet(output_dir / "shap_inputs.parquet", index=False)
+    test_receipt.iloc[explanation_positions].assign(test_row=explanation_positions).to_parquet(output_dir / "shap_receipt.parquet", index=False)
+    background_positions = np.sort(np.random.default_rng(RANDOM_SEED).choice(len(x_train), min(100, len(x_train)), replace=False))
+    x_train.iloc[background_positions].reset_index(drop=True).to_parquet(output_dir / "shap_background.parquet", index=False)
     metrics, segments, year_make_segments, diagnostics = [], [], [], []
     validation_segments, validation_year_make = [], []
+    make_price_segments, focus_segments, validation_make_price = [], [], []
     artifacts = {}
     metadata = {
         **data_info, "status": "running", "model_type": model_type,
+        "test_evaluated": evaluate_test,
+        "requested_models": model_names, "model_comparisons_during_training": False,
+        "shap_inputs": "shap_inputs.parquet", "shap_background": "shap_background.parquet",
+        "shap_receipt": "shap_receipt.parquet",
+        "shap_input_sha256": {filename: file_sha256(output_dir / filename) for filename in (
+            "shap_inputs.parquet", "shap_receipt.parquet", "shap_background.parquet")},
         "target_column": TARGET_COLUMN,
         "target_transform": "natural_log",
         "price_weighting": price_weighting,
@@ -1701,8 +2125,18 @@ def run_price_model_pilot(
         "dataset_fingerprint": dataset_fingerprint, "source_file_sha256": source_hashes,
         "split_fingerprint": split_hash, "code_fingerprint": code_fingerprint,
         "package_versions": package_versions,
+        "device_request": device, "training_devices": training_devices,
+        "full_validation": full_validation,
+        "validation_evaluation_rows": len(evaluation_validation_index),
+        "tuning_sampling_version": "cohort_quotas_v1",
+        "tuning_fingerprint": tuning_hash,
+        "tuning_sampling": {"fit": fit_sample_info, "validation": validation_sample_info},
+        "tree_budget_policy": "expand_until_validation_plateau" if max_trees == 0 else "fixed_ceiling",
+        "forest_stopping": {"batch_trees": 100, "patience_batches": 3, "minimum_relative_mae_gain": 0.001}
+                           if max_trees == 0 else None,
         "split_strategy": split_strategy,
-        "split_method": ("year/make/model blocks; all trims together" if split_strategy == "unseen_family"
+        "split_method": ("decoded year/make/model stratified VINs; minimum 25; 60/20/20" if split_strategy == "cohort_stratified"
+                         else "year/make/model blocks; all trims together" if split_strategy == "unseen_family"
                          else "VIN groups split within the full population; year/make/model families may appear in all partitions"),
         "split_seed": RANDOM_SEED, "split_details": split_info,
         "train_rows": len(outer_train_index), "validation_rows_for_early_stopping": len(validation_index),
@@ -1721,7 +2155,17 @@ def run_price_model_pilot(
         "uncertainty": "95% percentile interval from 200 resamples of held-out split blocks; conditional on this fitted model/split",
         "models": artifacts,
     }
+    if "pcr" in model_names:
+        metadata["pcr_protocol"] = {"version": PCR_PROTOCOL_VERSION, "n_components": PCR_COMPONENTS,
+            "numerical_candidates": [c for c in raw_numeric_columns if c not in PCR_FLAG_COLUMNS],
+            "retained_flags": [c for c in numeric_columns if c in PCR_FLAG_COLUMNS or c.endswith("__missing")],
+            "categorical_fields": categorical_columns, "whiten": False,
+            "selection": "31 components fixed after exploratory fit-only PCA; no component-count search"}
     def checkpoint():
+        metadata["elapsed_seconds"] = time.perf_counter() - run_started
+        pd.DataFrame(make_price_segments).to_csv(output_dir / "make_price_metrics.csv", index=False)
+        pd.DataFrame(focus_segments).to_csv(output_dir / "focus_make_metrics.csv", index=False)
+        pd.DataFrame(validation_make_price).to_csv(output_dir / "validation_make_price_metrics.csv", index=False)
         pd.DataFrame(metrics).to_csv(output_dir / "metrics.csv", index=False)
         pd.DataFrame(segments).to_csv(output_dir / "segment_metrics.csv", index=False)
         pd.DataFrame(year_make_segments).to_csv(output_dir / "year_make_metrics.csv", index=False)
@@ -1729,110 +2173,411 @@ def run_price_model_pilot(
         pd.DataFrame(validation_year_make).to_csv(output_dir / "validation_year_make_metrics.csv", index=False)
         pd.DataFrame([{k: v for k, v in row.items() if k == "model" or k.startswith("validation_")}
                       for row in metrics]).to_csv(output_dir / "validation_metrics.csv", index=False)
-        (output_dir / "tuning_results.json").write_text(json.dumps(diagnostics, indent=2, default=str), encoding="utf-8")
+        _write_json_checkpoint(output_dir / "tuning_results.json", diagnostics)
         # Publish metadata last. Notebook accepts completed runs only.
-        (output_dir / "run_metadata.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
+        _write_json_checkpoint(output_dir / "run_metadata.json", metadata)
 
     def record(name, predictions, validation_mae, params, iterations, selected_evaluation=None):
-        result = prediction_metrics(y[test_index], predictions, groups[test_index])
+        result = (prediction_metrics(y[test_index], predictions, groups[test_index]) if evaluate_test else
+                  {"mae": None, "rmse": None, "r2": None, "wape_pct": None, "mean_signed_error": None})
         result.update(model=name, test_rows=len(test_index), validation_mae=validation_mae,
                       selected_parameters=json.dumps(params, default=str), best_iteration=iterations)
         if selected_evaluation:
             result.update({k: v for k, v in selected_evaluation.items() if k != "predictions"})
             validation_predictions = validation_receipt.copy()
             validation_predictions["prediction"] = selected_evaluation["predictions"]
+            validation_predictions.to_parquet(output_dir / f"{name}_validation_predictions.parquet", index=False)
+            validation_make_price.extend(make_price_metrics(validation_predictions, name, makes=all_makes))
             validation_segments.extend(segment_metrics(validation_predictions, name))
             validation_year_make.extend(year_make_metrics(validation_predictions, name))
         metrics.append(result)
+        if not evaluate_test:
+            print(f"{name}: validation MAE={validation_mae}; test evaluation deferred", flush=True)
+            return
         receipt = test_receipt.copy()
         receipt["prediction"] = predictions
         receipt["residual"] = receipt["actual_price"] - receipt["prediction"]
         receipt.to_parquet(output_dir / f"{name}_test_predictions.parquet", index=False)
+        make_price_segments.extend(make_price_metrics(receipt, name, makes=all_makes))
+        focus_segments.extend(make_price_metrics(receipt, name, focus_only=True))
         segments.extend(segment_metrics(receipt, name))
         year_make_segments.extend(year_make_metrics(receipt, name))
         print(f"{name}: test MAE=${result['mae']:,.0f}; test R²={result['r2']}; validation MAE={validation_mae}; "
               f"trees={iterations}; parameters={params}")
 
     baseline = DummyRegressor(strategy="median").fit(np.zeros((len(outer_train_index), 1)), y_log[outer_train_index])
-    validation_baseline = DummyRegressor(strategy="median").fit(np.zeros((len(tune_fit_index), 1)), y_log[tune_fit_index])
+    baseline_fit_index = fit_index if full_validation else tune_fit_index
+    validation_baseline = DummyRegressor(strategy="median").fit(np.zeros((len(baseline_fit_index), 1)), y_log[baseline_fit_index])
     baseline_evaluation = {}
-    if len(tune_validation_index):
-        baseline_predictions = np.exp(validation_baseline.predict(np.zeros((len(tune_validation_index), 1))))
-        baseline_evaluation.update(validation_metrics(y[tune_validation_index], baseline_predictions), predictions=baseline_predictions)
-    record("training_median_baseline", np.exp(baseline.predict(np.zeros((len(test_index), 1)))),
+    if len(evaluation_validation_index):
+        baseline_predictions = np.exp(validation_baseline.predict(np.zeros((len(evaluation_validation_index), 1))))
+        baseline_evaluation.update(validation_metrics(y[evaluation_validation_index], baseline_predictions), predictions=baseline_predictions)
+    record("training_median_baseline", np.exp(baseline.predict(np.zeros((len(test_index), 1)))) if evaluate_test else None,
            baseline_evaluation.get("validation_mae"), {}, None, baseline_evaluation)
     checkpoint()
+    def evaluate_full_validation(name, params, iterations, selected_evaluation):
+        if not full_validation:
+            return selected_evaluation.get("validation_mae")
+        with stage(name, "full_validation_fit"):
+            if name in TREE_MODEL_NAMES:
+                validation_model = _make_tree_model(name, iterations, early_stopping=False,
+                    parameters=params, device=training_devices[name]["device"])
+                kwargs = {"sample_weight": training_price_weights(y[fit_index], price_weighting)}
+                if name == "catboost":
+                    kwargs["cat_features"] = categorical_columns
+                elif name == "lightgbm":
+                    kwargs["categorical_feature"] = categorical_columns
+            else:
+                validation_model = _make_classical_pipeline(name, categorical_columns, numeric_columns).set_params(**params)
+                kwargs = {"model__sample_weight": training_price_weights(y[fit_index], price_weighting)}
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ConvergenceWarning)
+                validation_model.fit(x_full_fit, y_log[fit_index], **kwargs)
+            if any(issubclass(w.category, ConvergenceWarning) for w in caught):
+                raise RuntimeError(f"{name} full-validation fit did not converge")
+            predictions = np.exp(validation_model.predict(x_full_validation))
+            selected_evaluation.clear()
+            selected_evaluation.update(validation_metrics(y[validation_index], predictions), predictions=predictions)
+            del validation_model
+        return selected_evaluation["validation_mae"]
+
     try:
         for name in model_names:
+            model_started = time.perf_counter()
+            logger.info("Model %s starting", name)
             params, validation_mae, iterations = {}, None, None
             selected_evaluation = {}
             if name in TREE_MODEL_NAMES:
-                if x_validation is not None:
-                    iterations, validation_mae, params, selected_cap_limited = _fit_with_early_stopping(
-                        name, x_fit, y_log[tune_fit_index], x_validation, y_log[tune_validation_index],
-                        categorical_columns, max_trees, diagnostics,
-                        sample_weight=tune_weights, selected_evaluation=selected_evaluation,
-                    )
-                else:
-                    iterations, params = min(400, max_trees), TREE_PARAMETER_CANDIDATES[name][0]
-                    selected_cap_limited = False
-                final_model = _make_tree_model(name, iterations, early_stopping=False, parameters=params)
-                if name == "catboost":
-                    final_model.fit(x_train, y_log[outer_train_index], sample_weight=final_weights,
-                                    cat_features=categorical_columns, verbose=False)
-                elif name == "lightgbm":
-                    final_model.fit(x_train, y_log[outer_train_index], sample_weight=final_weights,
-                                    categorical_feature=categorical_columns)
-                else:
-                    final_model.fit(x_train, y_log[outer_train_index], sample_weight=final_weights, verbose=False)
+                with stage(name, "tuning"):
+                    if x_validation is not None:
+                        iterations, validation_mae, params, selected_cap_limited = _fit_with_early_stopping(
+                            name, x_fit, y_log[tune_fit_index], x_validation, y_log[tune_validation_index],
+                            categorical_columns, max_trees, diagnostics,
+                            sample_weight=tune_weights, selected_evaluation=selected_evaluation, progress=checkpoint,
+                            device=training_devices[name]["device"],
+                        )
+                    else:
+                        if max_trees == 0:
+                            raise ValueError("Unlimited tree search requires a validation partition")
+                        iterations, params = min(400, max_trees), TREE_PARAMETER_CANDIDATES[name][0]
+                        selected_cap_limited = False
+                model_dir = output_dir / name
+                model_dir.mkdir(exist_ok=True)
+                (model_dir / "selection.json").write_text(json.dumps({"parameters": params, "iterations": iterations,
+                    "validation_mae": validation_mae}, indent=2), encoding="utf-8")
+                checkpoint()
+                tuning_validation_mae = validation_mae
+                validation_mae = evaluate_full_validation(name, params, iterations, selected_evaluation)
+                with stage(name, "final_fit"):
+                    final_model = _make_tree_model(name, iterations, early_stopping=False, parameters=params,
+                                                   device=training_devices[name]["device"])
+                    if name == "catboost":
+                        final_model.fit(x_train, y_log[outer_train_index], sample_weight=final_weights,
+                                        cat_features=categorical_columns, verbose=False)
+                    elif name == "lightgbm":
+                        final_model.fit(x_train, y_log[outer_train_index], sample_weight=final_weights,
+                                        categorical_feature=categorical_columns)
+                    else:
+                        final_model.fit(x_train, y_log[outer_train_index], sample_weight=final_weights, verbose=False)
             else:
-                final_model, params, validation_mae = _fit_classical_model(
-                    name, x_fit, y_log[tune_fit_index], x_validation,
-                    y_log[tune_validation_index] if x_validation is not None else None,
-                    categorical_columns, numeric_columns, diagnostics,
-                    sample_weight=tune_weights, selected_evaluation=selected_evaluation,
-                )
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter("always", ConvergenceWarning)
-                    final_model.fit(x_train, y_log[outer_train_index], model__sample_weight=final_weights)
-                if any(issubclass(w.category, ConvergenceWarning) for w in caught):
-                    diagnostics.append({"model": name, "phase": "final_refit", "converged": False,
-                                        "warnings": [str(w.message) for w in caught]})
-                    raise RuntimeError(f"{name} final refit did not converge; successful earlier model artifacts are preserved")
+                with stage(name, "tuning"):
+                    final_model, params, validation_mae = _fit_classical_model(
+                        name, x_fit, y_log[tune_fit_index], x_validation,
+                        y_log[tune_validation_index] if x_validation is not None else None,
+                        categorical_columns, numeric_columns, diagnostics,
+                        sample_weight=tune_weights, selected_evaluation=selected_evaluation, progress=checkpoint,
+                        unlimited_trees=max_trees == 0,
+                    )
+                model_dir = output_dir / name
+                model_dir.mkdir(exist_ok=True)
+                (model_dir / "selection.json").write_text(json.dumps({"parameters": params, "iterations": iterations,
+                    "validation_mae": validation_mae}, indent=2), encoding="utf-8")
+                checkpoint()
+                tuning_validation_mae = validation_mae
+                validation_mae = evaluate_full_validation(name, params, iterations, selected_evaluation)
+                with stage(name, "final_fit"):
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter("always", ConvergenceWarning)
+                        final_model.fit(x_train, y_log[outer_train_index], model__sample_weight=final_weights)
+                    if any(issubclass(w.category, ConvergenceWarning) for w in caught):
+                        diagnostics.append({"model": name, "phase": "final_refit", "converged": False,
+                                            "warnings": [str(w.message) for w in caught]})
+                        raise RuntimeError(f"{name} final refit did not converge; successful earlier model artifacts are preserved")
             model_dir = output_dir / name
-            model_dir.mkdir()
+            model_dir.mkdir(exist_ok=True)
             native_file = _save_model(final_model, name, model_dir / "model")
             # This bundle accepts the raw, joined feature columns in the saved
             # schema; transformations never inspect other prediction rows.
             bundle = Pipeline([("input", final_preprocessor),
                                ("estimator", ExpLogPricePredictor(final_model))])
+            bundle.raw_feature_columns_ = raw_features
+            bundle.expert_feature_info_ = data_info.get("expert_features")
             joblib.dump(bundle, model_dir / "predictor.joblib", compress=3)
-            record(name, np.exp(final_model.predict(x_test)), validation_mae, params, iterations, selected_evaluation)
+            logger.info("Saved fitted %s predictor; starting test metrics", name)
+            with stage(name, "test_and_reports"):
+                record(name, np.exp(final_model.predict(x_test)) if evaluate_test else None, validation_mae, params, iterations, selected_evaluation)
             artifacts[name] = {
                 "model_file": native_file, "predictor_file": "predictor.joblib",
                 "best_iteration": iterations, "selected_parameters": params,
                 "validation_mae": validation_mae,
                 **{k: v for k, v in selected_evaluation.items() if k != "predictions"},
                 "validation_tuning_performed": x_validation is not None,
+                "tuning_validation_mae": tuning_validation_mae,
+                "training_device": training_devices[name],
                 "tree_cap_reached": selected_cap_limited if name in TREE_MODEL_NAMES else False,
-                "shap_files": (_write_shap_outputs(final_model, name, x_test, y_log[test_index], features,
-                    categorical_columns, model_dir, shap_rows) if name in TREE_MODEL_NAMES else None),
+                "status": "completed", "elapsed_seconds": time.perf_counter() - model_started,
+                "shap_files": None,
             }
+            if name == "pcr":
+                fitted_pca = final_model.named_steps["preprocess"].named_transformers_["components"]
+                pca_info = {"n_components": fitted_pca.n_components,
+                    "retained_numerical_fields": fitted_pca.retained_features_,
+                    "excluded_constant_fields": fitted_pca.excluded_constant_features_,
+                    "explained_variance_ratio": fitted_pca.pca_.explained_variance_ratio_.tolist(),
+                    "cumulative_explained_variance": float(fitted_pca.pca_.explained_variance_ratio_.sum())}
+                _write_json_checkpoint(model_dir / "pca_summary.json", pca_info)
+                artifacts[name]["pca_summary"] = pca_info
             checkpoint()
+            logger.info("Saved completed model %s in %.1fs", name, time.perf_counter() - model_started)
             del bundle, final_model
             gc.collect()
-        candidates = [row for row in metrics
-                      if row["validation_mae"] is not None
-                      and row["model"] != "training_median_baseline"]
-        metadata["selected_by_validation_mae"] = min(candidates, key=lambda row: row["validation_mae"])["model"] if candidates else None
         metadata["status"] = "completed"
     except Exception as exc:
         metadata.update(status="failed", failure=f"{type(exc).__name__}: {exc}")
         raise
     finally:
         checkpoint()
+        for handler in (file_handler, console_handler):
+            logger.removeHandler(handler)
+            handler.close()
+    if shap_rows:
+        results = explain_saved_run(output_dir, shap_rows)
+        if any(item["status"] != "completed" for item in results.values()):
+            raise RuntimeError("Training completed, but deferred SHAP failed; inspect shap_status.json")
     print(f"Saved outputs to: {output_dir}")
     return output_dir
+
+
+
+def _write_json_checkpoint(path: Path, contents) -> None:
+    """Replace checkpoint metadata atomically so interruption preserves the last receipt."""
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(contents, indent=2, default=str), encoding="utf-8")
+    for attempt in range(6):
+        try:
+            temporary.replace(path)
+            break
+        except PermissionError:
+            if attempt == 5:
+                raise
+            # Windows indexers can briefly hold freshly written metadata open.
+            time.sleep(0.05 * 2 ** attempt)
+
+
+def explain_saved_run(run_dir: Path, rows: int = 1000, model_names=None) -> dict:
+    """Explain saved models and frozen inputs; never reload sources or refit."""
+    import gc
+    import joblib
+    from scipy import sparse
+
+    run_dir = Path(run_dir)
+    metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    x = pd.read_parquet(run_dir / metadata["shap_inputs"])
+    receipt = pd.read_parquet(run_dir / metadata["shap_receipt"])
+    background = pd.read_parquet(run_dir / metadata["shap_background"])
+    if rows < 1:
+        raise ValueError("Explanation rows must be positive")
+    x, receipt = x.head(rows), receipt.head(rows)
+    if list(x.columns) != metadata["feature_columns"] or len(x) != len(receipt):
+        raise ValueError("Saved SHAP inputs do not match the fitted feature schema")
+    for filename, expected in metadata.get("shap_input_sha256", {}).items():
+        if file_sha256(run_dir / filename) != expected:
+            raise ValueError(f"Saved SHAP input changed: {filename}")
+    names = model_names or list(metadata["models"])
+    if any(name not in metadata["models"] for name in names):
+        raise ValueError("Explain only models with completed saved artifacts")
+    status_path = run_dir / "shap_status.json"
+    results = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
+    with (run_dir / "shap.log").open("a", encoding="utf-8") as log:
+        for name in names:
+            started = time.perf_counter()
+            print(f"Explaining saved {run_dir.name} / {name}", flush=True)
+            try:
+                model_dir = run_dir / name
+                bundle = joblib.load(model_dir / "predictor.joblib")
+                model = bundle.named_steps["estimator"].estimator
+                features = list(x.columns)
+                explain_x = x
+                if name in CLASSICAL_MODEL_NAMES or name == "pcr":
+                    transformer = model.named_steps["preprocess"]
+                    explain_x = transformer.transform(x)
+                    transformed_background = transformer.transform(background)
+                    features = list(transformer.get_feature_names_out())
+                    model = model.named_steps["model"]
+                    import shap
+                    if name == "random_forest":
+                        dense = explain_x.toarray() if sparse.issparse(explain_x) else explain_x
+                        explainer = shap.TreeExplainer(model)
+                        values = explainer.shap_values(dense)
+                    else:
+                        explainer = shap.LinearExplainer(model, transformed_background)
+                        values = explainer.shap_values(explain_x)
+                    base = np.full(len(x), float(np.asarray(explainer.expected_value).reshape(-1)[0]))
+                elif name == "catboost":
+                    from catboost import Pool
+                    raw = model.get_feature_importance(Pool(x, cat_features=metadata["categorical_features"]), type="ShapValues")
+                    values, base = raw[:, :-1], raw[:, -1]
+                elif name == "xgboost":
+                    import xgboost as xgb
+                    raw = model.get_booster().predict(xgb.DMatrix(x, enable_categorical=True), pred_contribs=True)
+                    values, base = raw[:, :-1], raw[:, -1]
+                else:
+                    raw = model.predict(x, pred_contrib=True)
+                    values, base = raw[:, :-1], raw[:, -1]
+                values = np.asarray(values)
+                predicted = np.asarray(model.predict(explain_x))
+                if values.shape != (len(x), len(features)):
+                    raise ValueError("SHAP dimensions differ from the explained model")
+                np.testing.assert_allclose(base + values.sum(axis=1), predicted, rtol=1e-4, atol=1e-4)
+                global_path = model_dir / f"{name}_shap_global.csv"
+                pd.DataFrame({"feature": features, "mean_absolute_shap": np.abs(values).mean(axis=0)}) \
+                    .sort_values("mean_absolute_shap", ascending=False).to_csv(global_path, index=False)
+                row_values = pd.DataFrame(values, columns=features)
+                row_values.insert(0, "base_value_log_price", base)
+                row_values.insert(0, "predicted_log_price", predicted)
+                row_values.insert(0, "actual_price", receipt.actual_price.to_numpy())
+                row_values.insert(0, "vin", receipt.vin.to_numpy())
+                row_values.insert(0, "test_row", receipt.test_row.to_numpy())
+                row_path = model_dir / f"{name}_shap_values.parquet"
+                row_values.to_parquet(row_path, index=False)
+                result = {"status": "completed", "rows": len(x), "scale": "ln(price in USD)",
+                          "feature_space": "encoded estimator inputs" if name in CLASSICAL_MODEL_NAMES or name == "pcr" else "preprocessed inputs",
+                          "global_importance": global_path.name, "row_values": row_path.name}
+                metadata["models"][name]["shap_files"] = result
+                del bundle, model
+                gc.collect()
+            except Exception as exc:
+                result = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            result["elapsed_seconds"] = time.perf_counter() - started
+            results[name] = result
+            log.write(json.dumps({"model": name, **result}) + "\n")
+            log.flush()
+            _write_json_checkpoint(status_path, results)
+            _write_json_checkpoint(run_dir / "run_metadata.json", metadata)
+            print(f"SHAP {name}: {result}", flush=True)
+    return results
+
+
+def paired_expert_validation(left, right):
+    """Paired USD error changes with family-block bootstrap; right minus left."""
+    required = {"vin", "actual_price", "prediction", "family_block"}
+    if not required.issubset(left.columns) or not required.issubset(right.columns):
+        raise ValueError("Paired validation receipts lack VIN/target/family identity")
+    if set(left.vin) != set(right.vin) or len(left) != len(right):
+        raise ValueError("Validation runs evaluated different VINs")
+    matched = right.merge(left[list(required)], on="vin", suffixes=("_right", "_left"), validate="one_to_one")
+    if (not np.array_equal(matched.actual_price_right, matched.actual_price_left)
+            or not np.array_equal(matched.family_block_right, matched.family_block_left)):
+        raise ValueError("Validation targets or family blocks differ")
+    rows = []
+    for level in ("overall", "cohort", "make_average", "missing"):
+        part = matched if level == "overall" else matched[matched.doug_source_level.eq(level)]
+        row = {"doug_source_level": level, "rows": len(part), "family_blocks": part.family_block_right.nunique()}
+        for side in ("left", "right"):
+            metrics = regression_metrics(part.actual_price_right, part[f"prediction_{side}"]) if len(part) else {"mae": None, "rmse": None}
+            row.update({f"{metric}_{side}": metrics[metric] for metric in ("mae", "rmse")})
+        if len(part):
+            errors = part.actual_price_right.to_numpy()[:, None] - part[["prediction_left", "prediction_right"]].to_numpy()
+            stats = pd.DataFrame({"family": part.family_block_right.to_numpy(), "n": 1,
+                "ae_left": abs(errors[:, 0]), "ae_right": abs(errors[:, 1]),
+                "se_left": errors[:, 0] ** 2, "se_right": errors[:, 1] ** 2}).groupby("family").sum().to_numpy()
+            rng = np.random.default_rng(RANDOM_SEED)
+            changes = []
+            for _ in range(200):
+                sums = stats[rng.integers(0, len(stats), len(stats))].sum(axis=0)
+                n, al, ar, sl, sr = sums
+                changes.append((ar / n - al / n, np.sqrt(sr / n) - np.sqrt(sl / n)))
+            bounds = np.quantile(changes, [.025, .975], axis=0)
+        for i, metric in enumerate(("mae", "rmse")):
+            row[f"{metric}_delta"] = row[f"{metric}_right"] - row[f"{metric}_left"] if len(part) else None
+            row[f"{metric}_delta_low"] = float(bounds[0, i]) if row["family_blocks"] >= 2 else None
+            row[f"{metric}_delta_high"] = float(bounds[1, i]) if row["family_blocks"] >= 2 else None
+        row["support_status"] = "no_rows" if not len(part) else "supported" if len(part) >= 100 and row["family_blocks"] >= 5 else "low_support"
+        rows.append(row)
+    return rows
+
+
+def compare_saved_runs(run_dirs) -> Path:
+    """Compare compatible saved metrics after fitting, without retraining."""
+    runs = [(Path(path), json.loads((Path(path) / "run_metadata.json").read_text(encoding="utf-8")))
+            for path in run_dirs]
+    reference = runs[0][1]
+    common_sources = ("used_cars.parquet", "NHTSA_vPIC.parquet", "NHTSA_Complaints.parquet",
+                      "NHTSA_Recalls.parquet", "NHTSA_Safety.parquet")
+    for path, metadata in runs:
+        if metadata["status"] != "completed":
+            raise ValueError(f"Run is incomplete: {path}")
+        if not execution_protocol_matches(metadata, reference):
+            raise ValueError(f"Runs differ in device, tuning sample, or full-validation protocol: {path}")
+        for key in ("split_fingerprint", "split_strategy", "preprocessing_version", "code_fingerprint",
+                    "package_versions", "tuning_rows", "max_trees"):
+            if metadata[key] != reference[key]:
+                raise ValueError(f"Runs differ in {key}: {path}")
+        for source in common_sources:
+            if metadata["source_file_sha256"][source] != reference["source_file_sha256"][source]:
+                raise ValueError(f"Runs use different {source} snapshots")
+    shared_hashes = {}
+    for path, metadata in runs:
+        for source, digest_value in metadata["source_file_sha256"].items():
+            if source in shared_hashes and shared_hashes[source] != digest_value:
+                raise ValueError(f"Runs use different {source} feature snapshots")
+            shared_hashes[source] = digest_value
+    output = MODEL_OUTPUT_DIR / "comparisons" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    output.mkdir(parents=True)
+    for filename in ("metrics.csv", "validation_metrics.csv", "segment_metrics.csv", "year_make_metrics.csv",
+                     "make_price_metrics.csv", "focus_make_metrics.csv", "validation_segment_metrics.csv",
+                     "validation_year_make_metrics.csv", "validation_make_price_metrics.csv"):
+        frames = []
+        for path, metadata in runs:
+            try:
+                table = pd.read_csv(path / filename)
+            except pd.errors.EmptyDataError:
+                continue
+            table.insert(0, "run", str(path))
+            table.insert(1, "model_type", metadata["model_type"])
+            table.insert(2, "price_weighting", metadata["price_weighting"])
+            frames.append(table)
+        if frames:
+            pd.concat(frames, ignore_index=True).to_csv(output / filename, index=False)
+    paired_rows = []
+    pairs = (("enhanced_safety", "enhanced_safety_expert"),
+             ("enhanced_safety", "enhanced_safety_expert_coverage"),
+             ("full_youtube", "full"), ("full_youtube", "full_youtube_expert_coverage"),
+             ("enhanced_safety_expert_coverage", "enhanced_safety_expert"),
+             ("full_youtube_expert_coverage", "full"))
+    for left_path, left_meta in runs:
+        for right_path, right_meta in runs:
+            if ((left_meta["model_type"], right_meta["model_type"]) not in pairs
+                    or left_meta["price_weighting"] != right_meta["price_weighting"]):
+                continue
+            for left_file in sorted(left_path.glob("*_validation_predictions.parquet")):
+                right_file = right_path / left_file.name
+                if not right_file.exists():
+                    continue
+                for row in paired_expert_validation(pd.read_parquet(left_file), pd.read_parquet(right_file)):
+                    paired_rows.append({"left_run": str(left_path), "right_run": str(right_path),
+                        "left_variant": left_meta["model_type"], "right_variant": right_meta["model_type"],
+                        "model": left_file.name.removesuffix("_validation_predictions.parquet"),
+                        "price_weighting": left_meta["price_weighting"], **row})
+    if paired_rows:
+        pd.DataFrame(paired_rows).to_csv(output / "validation_expert_comparison.csv", index=False)
+    validation = pd.read_csv(output / "validation_metrics.csv")
+    ranked = validation[validation.model.ne("training_median_baseline")].sort_values("validation_mae")
+    ranked.to_csv(output / "validation_ranking.csv", index=False)
+    (output / "comparison_metadata.json").write_text(json.dumps({"runs": [str(p) for p, _ in runs],
+        "selection_metric": "validation_mae_usd", "test_used_for_selection": False}, indent=2), encoding="utf-8")
+    print(f"Saved comparison: {output}")
+    return output
 
 
 def run_price_forecast_suite(args: Any) -> int:
@@ -1841,20 +2586,65 @@ def run_price_forecast_suite(args: Any) -> int:
     import sys
 
     failures = []
-    combinations = [(kind, mode) for kind in args.model_types for mode in args.price_weightings]
+    suite_runs = []
+    suite_started = time.perf_counter()
+    suite_path = MODEL_OUTPUT_DIR / "suites" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    suite_path.mkdir(parents=True)
+    combinations = [(kind, mode) for kind in args.model_types for mode in args.price_weightings
+                    if kind == "full" or any(name != "pcr" for name in args.models)]
+    if not combinations:
+        raise ValueError("PCR requires the full feature set; use --model-type full --models pcr")
     for model_type, price_weighting in combinations:
+        variant_models = [name for name in args.models if name != "pcr" or model_type == "full"]
         command = [sys.executable, "-m", "MODELS.Price_ML_Models",
                    "--model-type", model_type, "--sample-size", str(args.sample_size),
                    "--tuning-rows", str(args.tuning_rows), "--max-trees", str(args.max_trees),
-                   "--shap-rows", str(args.shap_rows), "--split-strategy", args.split_strategy,
+                   "--shap-rows", "0", "--split-strategy", args.split_strategy,
                    "--price-weightings", price_weighting,
-                   "--models", *args.models]
+                   "--models", *variant_models]
+        command += ["--expert-feature-dir", str(getattr(args, "expert_feature_dir", EXPERT_FEATURE_DIRECTORY))]
+        command += ["--device", getattr(args, "device", "auto")]
+        if getattr(args, "full_validation", False):
+            command.append("--full-validation")
+        if getattr(args, "validation_only", False):
+            command.append("--validation-only")
         print(f"\n=== Running {model_type} / weighting={price_weighting} ===", flush=True)
-        result = subprocess.run(command, cwd=PROJECT_ROOT, check=False)
-        if result.returncode:
-            failures.append((model_type, price_weighting, result.returncode))
-            print(f"{model_type} / {price_weighting} failed with exit code {result.returncode}; continuing.",
+        variant_record = {"model_type": model_type, "price_weighting": price_weighting,
+                          "status": "running", "command": command}
+        _write_json_checkpoint(suite_path / "suite_manifest.json", {"runs": suite_runs,
+            "status": "running", "active_variant": variant_record,
+            "elapsed_seconds": time.perf_counter() - suite_started})
+        before = set((MODEL_OUTPUT_DIR / model_type).glob("*/run_metadata.json"))
+        started = time.perf_counter()
+        with (suite_path / "run.log").open("a", encoding="utf-8") as log:
+            process = subprocess.Popen(command, cwd=PROJECT_ROOT, stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                log.write(line)
+                log.flush()
+            returncode = process.wait()
+        added = set((MODEL_OUTPUT_DIR / model_type).glob("*/run_metadata.json")) - before
+        suite_runs.extend(str(p.parent) for p in sorted(added))
+        (suite_path / "suite_manifest.json").write_text(json.dumps({"runs": suite_runs,
+            "elapsed_seconds": time.perf_counter() - suite_started,
+            "last_variant_seconds": time.perf_counter() - started,
+            "status": "running", "last_returncode": returncode}, indent=2), encoding="utf-8")
+        if returncode:
+            failures.append((model_type, price_weighting, returncode))
+            print(f"{model_type} / {price_weighting} failed with exit code {returncode}; continuing.",
                   flush=True)
+    manifest_path = suite_path / "suite_manifest.json"
+    suite_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    suite_manifest.update(status="failed" if failures else "completed", failures=failures,
+                          elapsed_seconds=time.perf_counter() - suite_started)
+    manifest_path.write_text(json.dumps(suite_manifest, indent=2), encoding="utf-8")
+    print(f"Suite manifest and log: {suite_path}")
+    if args.shap_rows and not failures:
+        for run in suite_runs:
+            results = explain_saved_run(Path(run), args.shap_rows)
+            if any(item["status"] != "completed" for item in results.values()):
+                failures.append((run, "SHAP", 1))
     if failures:
         print("Failed forecast runs:", failures, file=sys.stderr)
         return 1
@@ -1865,27 +2655,66 @@ def run_price_forecast_suite(args: Any) -> int:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Train group-held-out advertised-price models for all listings.")
+    parser = argparse.ArgumentParser(description="Train advertised-price models with cohort-stratified VIN splits.")
+    parser.add_argument("--compare-suite", type=Path, help="Compare all run directories listed in a saved suite.")
+    parser.add_argument("--explain-suite", type=Path, help="Explain all run directories listed in a saved suite.")
+    parser.add_argument("--compare-runs", nargs="+", type=Path,
+                        help="Compare compatible saved run directories without training.")
+    parser.add_argument("--explain-runs", nargs="+", type=Path,
+                        help="Compute SHAP from saved models and frozen inputs without training.")
+    parser.add_argument("--explanation-rows", type=int, default=1000,
+                        help="Rows explained from each saved sample (at most 1000).")
+    parser.add_argument("--explain-models", nargs="+", choices=AVAILABLE_MODEL_NAMES,
+                        help="Optional subset of saved models to explain.")
+    parser.add_argument("--expert-feature-dir", type=Path, default=EXPERT_FEATURE_DIRECTORY,
+                        help="Versioned DougScore artifacts for expert variants; build with EXPERT_REVIEWS.price_features.")
+    parser.add_argument("--validation-only", action="store_true", help="Tune and save fitted predictors without scoring held-out test rows.")
+    parser.add_argument("--device", choices=("auto", "cpu", "gpu"), default="auto",
+                        help="Probe GPU training for boosters; auto records CPU fallback when unavailable. Sklearn models stay on CPU.")
+    parser.add_argument("--full-validation", action="store_true",
+                        help="After sample tuning, fit selected settings on every fit VIN and score every validation VIN before final fit+validation refit.")
     parser.add_argument("--model-type", choices=MODEL_FEATURE_SETS, default="base")
     parser.add_argument("--model-types", nargs="+", choices=MODEL_FEATURE_SETS,
                         help="Run several feature sets sequentially.")
-    parser.add_argument("--split-strategy", choices=("unseen_family", "known_family"),
-                        default="unseen_family",
-                        help="Hold out year/make/model families or VINs within known families.")
+    parser.add_argument("--split-strategy", choices=("cohort_stratified", "unseen_family", "known_family"),
+                        default="cohort_stratified",
+                        help="Default: 60/20/20 within decoded year/make/model cohorts with >=25 VINs; legacy group splits remain available.")
     parser.add_argument("--sample-size", type=int, default=100_000,
                         help="Uniform VIN-hash sample size; use 0 for the full filtered data.")
-    parser.add_argument("--models", nargs="+", choices=PILOT_MODEL_NAMES,
+    parser.add_argument("--models", nargs="+", choices=AVAILABLE_MODEL_NAMES,
                         default=list(PILOT_MODEL_NAMES))
     parser.add_argument("--price-weightings", nargs="+", choices=PRICE_WEIGHTING_MODES,
                         default=["none"], help="Compare ordinary training and capped price weighting in separate runs.")
-    parser.add_argument("--shap-rows", type=int, default=1_000,
-                        help="Maximum held-out rows explained per model; use 0 to skip SHAP.")
+    parser.add_argument("--shap-rows", type=int, default=0,
+                        help="Explain saved models only after training finishes; default 0 defers SHAP.")
     parser.add_argument("--tuning-rows", type=int, default=100_000,
-                        help="Maximum rows in each tuning partition; final refit uses all outer-training rows.")
+                        help="Target rows per tuning partition; cohort quotas may expand it to cover every cohort. Final refit uses all fit+validation rows.")
     parser.add_argument("--max-trees", type=int, default=PILOT_MAX_TREES,
-                        help="Boosting search ceiling (default 6400); early stopping selects fewer "
-                             "trees when validation MAE plateaus.")
+                        help="Boosting ceiling (default 6400); 0 doubles budgets until early stopping completes, and grows forests until a validation plateau.")
     args = parser.parse_args()
+    if sum(bool(value) for value in (args.compare_runs, args.explain_runs, args.compare_suite, args.explain_suite)) > 1:
+        parser.error("Choose one comparison or explanation command")
+    if args.compare_suite or args.explain_suite:
+        suite = json.loads(((args.compare_suite or args.explain_suite) / "suite_manifest.json").read_text(encoding="utf-8"))
+        if not suite["runs"]:
+            parser.error("Suite has no saved runs")
+        if args.compare_suite:
+            args.compare_runs = [Path(path) for path in suite["runs"]]
+        else:
+            args.explain_runs = [Path(path) for path in suite["runs"]]
+    if args.compare_runs and args.explain_runs:
+        parser.error("Use --compare-runs or --explain-runs separately")
+    if args.compare_runs:
+        compare_saved_runs(args.compare_runs)
+        raise SystemExit(0)
+    if args.explain_runs:
+        failed = False
+        for run in args.explain_runs:
+            results = explain_saved_run(run, args.explanation_rows, args.explain_models)
+            failed |= any(item["status"] != "completed" for item in results.values())
+        raise SystemExit(1 if failed else 0)
+    if args.shap_rows < 0:
+        parser.error("--shap-rows must be nonnegative")
     if args.sample_size < 0:
         parser.error("--sample-size must be 0 or positive")
     args.price_weightings = list(dict.fromkeys(args.price_weightings))
@@ -1902,4 +2731,8 @@ if __name__ == "__main__":
         max_trees=args.max_trees,
         split_strategy=args.split_strategy,
         price_weighting=args.price_weightings[0],
+        expert_feature_dir=args.expert_feature_dir,
+        evaluate_test=not args.validation_only,
+        device=args.device,
+        full_validation=args.full_validation,
     )

@@ -24,6 +24,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = PROJECT_ROOT / "DATA" / "CAR_DATA.db"
 FINAL_DATASET_PATH = PROJECT_ROOT / "DATA" / "CAR_DATA_FINAL"
 
+# User-reviewed listing errors; shared by export, model loading and dashboard.
+EXCLUDED_LISTING_VINS = frozenset({
+    "JN1BJ1CV7LW262847", "123686", "WBAGK2324TDH67073",
+    "3C7WRSAL3KG618855", "1FTEW1CP3LFC54483", "1FTEW1E4XLKE38250",
+})
+
 # Keep this list aligned with the selected tables documented in
 # DATA_DICTIONARY.md. The query ledger and vPIC lookup tables are excluded.
 TABLES_TO_LOAD = (
@@ -197,7 +203,6 @@ def _source_schema(connection: sqlite3.Connection, table: str) -> dict:
     columns = connection.execute(f'PRAGMA table_info("{table}")').fetchall()
     if not columns:
         raise RuntimeError(f"Expected table is missing from the database: {table}")
-    # SQLite DATE fields in the imported YouTube table are stored as text.
     types = {"TEXT": pl.String, "INTEGER": pl.Int64, "REAL": pl.Float64,
              "DATE": pl.String, "DATETIME": pl.String}
     schema = {}
@@ -334,7 +339,7 @@ def _load_cohort_exclusion_vins(review_csv: Path | None) -> set[str]:
         review_csv = candidates[-1]
     if not review_csv.is_file():
         raise FileNotFoundError(review_csv)
-    excluded: set[str] = set()
+    excluded: set[str] = set(EXCLUDED_LISTING_VINS)
     with review_csv.open(newline="", encoding="utf-8-sig") as source:
         for row in csv.DictReader(source):
             vin = (row.get("vin") or "").strip()
@@ -399,14 +404,13 @@ def _transform_for_export(table: str, batch: pl.DataFrame, plan: dict) -> pl.Dat
     if table == "used_cars":
         batch = clean_used_cars_batch(batch)
     elif table == "nhtsa_vpic_decodes":
-        # Remove the timestamp while numeric casts run to avoid a batch fallback.
+        # Keep timestamps outside numeric casts to avoid a batch fallback.
         timestamp = batch["fetched_at"] if "fetched_at" in batch.columns else None
         batch = clean_vpic_batch(batch.drop("fetched_at") if timestamp is not None else batch)
         if timestamp is not None:
             if plan["timestamp_as_datetime"]:
                 timestamp = timestamp.cast(pl.String).str.to_datetime(format="%Y-%m-%d %H:%M:%S")
             batch = batch.with_columns(timestamp)
-            # Preserve original source column order after renaming.
             batch = batch.select([name.removeprefix("vpic_") for name in plan["read_schema"]])
     elif table in JSON_TABLES:
         batch = _expand_json(batch, table, plan["json_columns"])
@@ -536,6 +540,7 @@ def export_parquet(database_path: Path = DATABASE_PATH,
                         "cohort_review_csv": str(review_source) if review_source else None,
                         "cohort_ratio_policy": "exclude VIN when price/cohort median > 2 or <= 0.75, or mileage/cohort median > 20",
                         "candidate_vins_removed": len(excluded_vins),
+                        "manual_excluded_vins": sorted(EXCLUDED_LISTING_VINS),
                         "rows_removed_for_reviewed_vins": removed_review_rows,
                     }
         (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -559,7 +564,6 @@ def export_parquet(database_path: Path = DATABASE_PATH,
 
 def scan_final_table(table_name: str = "used_cars",
                      dataset_path: Path = FINAL_DATASET_PATH) -> pl.LazyFrame:
-    """Return a Polars lazy scan so models can select/filter before collecting."""
     _validate_tables((table_name,))
     path = dataset_path / PARQUET_FILES[table_name]
     if not path.is_file():
@@ -570,7 +574,6 @@ def scan_final_table(table_name: str = "used_cars",
 def load_final_data(dataset_path: Path = FINAL_DATASET_PATH,
                     batch_size: int = BATCH_SIZE,
                     table_names: tuple[str, ...] = TABLES_TO_EXPORT) -> Iterator[tuple[str, pl.DataFrame]]:
-    """Read saved Parquet in bounded batches and return Polars DataFrames."""
     import pyarrow.parquet as pq
 
     _validate_tables(table_names)

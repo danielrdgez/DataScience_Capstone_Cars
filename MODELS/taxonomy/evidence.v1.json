@@ -1,0 +1,636 @@
+{
+  "taxonomy_version": "1.0.0",
+  "sources": [
+    {
+      "id": "mx5",
+      "make": "MAZDA",
+      "model": "MX-5",
+      "year_start": 2011,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Mazda_MX-5",
+      "excerpt": "lightweight two-seat sports car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded MAZDA/MX-5; bounded 2011-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "911",
+      "make": "PORSCHE",
+      "model": "911",
+      "year_start": 1985,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Porsche_911",
+      "excerpt": "two-door high performance rear-engined sports car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded PORSCHE/911; bounded 1985-2021 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "corvette",
+      "make": "CHEVROLET",
+      "model": "CORVETTE",
+      "year_start": 1981,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Chevrolet_Corvette",
+      "excerpt": "line of American two-door, two-seater sports cars",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded CHEVROLET/CORVETTE; bounded 1981-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "aventador",
+      "make": "LAMBORGHINI",
+      "model": "AVENTADOR",
+      "year_start": 2015,
+      "year_end": 2020,
+      "url": "https://www.lamborghini.com/en-en/history/aventador",
+      "excerpt": "a true supercar legend in the making",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LAMBORGHINI/AVENTADOR; bounded 2015-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "supercar"
+        }
+      ]
+    },
+    {
+      "id": "aventador-sports",
+      "make": "LAMBORGHINI",
+      "model": "AVENTADOR",
+      "year_start": 2015,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lamborghini_Aventador",
+      "excerpt": "mid-engine, two-seater sports car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LAMBORGHINI/AVENTADOR; bounded 2015-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "gallardo",
+      "make": "LAMBORGHINI",
+      "model": "GALLARDO",
+      "year_start": 2010,
+      "year_end": 2014,
+      "url": "https://en.wikipedia.org/wiki/Lamborghini_Gallardo",
+      "excerpt": "Sports car (S)",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LAMBORGHINI/GALLARDO; bounded 2010-2014 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "huracan",
+      "make": "LAMBORGHINI",
+      "model": "HURACAN",
+      "year_start": 2015,
+      "year_end": 2019,
+      "url": "https://en.wikipedia.org/wiki/Lamborghini_Hurac%C3%A1n",
+      "excerpt": "Sports car (S)",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LAMBORGHINI/HURACAN; bounded 2015-2019 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "sclass",
+      "make": "MERCEDES-BENZ",
+      "model": "S-CLASS",
+      "year_start": 1994,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Mercedes-Benz_S-Class",
+      "excerpt": "series of full-sized luxury sedans and coupés",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded MERCEDES-BENZ/S-CLASS; bounded 1994-2021 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        },
+        {
+          "dimension": "size_segment",
+          "label": "large"
+        }
+      ]
+    },
+    {
+      "id": "escalade",
+      "make": "CADILLAC",
+      "model": "ESCALADE",
+      "year_start": 2000,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Cadillac_Escalade",
+      "excerpt": "full-size luxury SUV",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded CADILLAC/ESCALADE; bounded 2000-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        },
+        {
+          "dimension": "size_segment",
+          "label": "large_suv"
+        }
+      ]
+    },
+    {
+      "id": "x5",
+      "make": "BMW",
+      "model": "X5",
+      "year_start": 2000,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/BMW_X5",
+      "excerpt": "Mid-size luxury crossover SUV",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded BMW/X5; bounded 2000-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        },
+        {
+          "dimension": "size_segment",
+          "label": "midsize_suv"
+        }
+      ]
+    },
+    {
+      "id": "rx",
+      "make": "LEXUS",
+      "model": "RX",
+      "year_start": 2004,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lexus_RX",
+      "excerpt": "Mid-size luxury crossover SUV (2003–present)",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LEXUS/RX; bounded 2004-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        },
+        {
+          "dimension": "size_segment",
+          "label": "midsize_suv"
+        }
+      ]
+    },
+    {
+      "id": "civic",
+      "make": "HONDA",
+      "model": "CIVIC",
+      "year_start": 2001,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Honda_Civic",
+      "excerpt": "since 2000 the Civic has been categorized as a compact car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded HONDA/CIVIC; bounded 2001-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "compact"
+        }
+      ]
+    },
+    {
+      "id": "versa2020",
+      "make": "NISSAN",
+      "model": "VERSA",
+      "year_start": 2020,
+      "year_end": 2020,
+      "url": "https://usa.nissannews.com/en-US/releases/us-2020-nissan-versa-press-kit",
+      "excerpt": "entry-level buyers at a highly affordable price",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded NISSAN/VERSA; bounded 2020-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "economy"
+        }
+      ]
+    },
+    {
+      "id": "panamera2017",
+      "make": "PORSCHE",
+      "model": "PANAMERA",
+      "year_start": 2017,
+      "year_end": 2017,
+      "url": "https://newsroom.porsche.com/en_US/products/new-2017-panamera-19909.html",
+      "excerpt": "grand touring automobile ... comfort of a luxury sedan",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded PORSCHE/PANAMERA; bounded 2017-2017 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "grand_tourer"
+        },
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ]
+    },
+    {
+      "id": "cclass",
+      "make": "MERCEDES-BENZ",
+      "model": "C-CLASS",
+      "year_start": 1995,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Mercedes-Benz_C-Class",
+      "excerpt": "Compact executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded MERCEDES-BENZ/C-CLASS; bounded 1995-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ],
+      "crosswalk": "compact_executive"
+    },
+    {
+      "id": "3series",
+      "make": "BMW",
+      "model": "3 SERIES",
+      "year_start": 1990,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/BMW_3_Series",
+      "excerpt": "Compact executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded BMW/3 SERIES; bounded 1990-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ],
+      "crosswalk": "compact_executive"
+    },
+    {
+      "id": "is",
+      "make": "LEXUS",
+      "model": "IS",
+      "year_start": 2001,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lexus_IS",
+      "excerpt": "Compact executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LEXUS/IS; bounded 2001-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ],
+      "crosswalk": "compact_executive"
+    },
+    {
+      "id": "a4",
+      "make": "AUDI",
+      "model": "A4",
+      "year_start": 1996,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Audi_A4",
+      "excerpt": "Compact executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded AUDI/A4; bounded 1996-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ],
+      "crosswalk": "compact_executive"
+    },
+    {
+      "id": "ats",
+      "make": "CADILLAC",
+      "model": "ATS",
+      "year_start": 2013,
+      "year_end": 2019,
+      "url": "https://en.wikipedia.org/wiki/Cadillac_ATS",
+      "excerpt": "Compact executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded CADILLAC/ATS; bounded 2013-2019 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ],
+      "crosswalk": "compact_executive"
+    },
+    {
+      "id": "es",
+      "make": "LEXUS",
+      "model": "ES",
+      "year_start": 1992,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lexus_ES",
+      "excerpt": "mid-size luxury",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LEXUS/ES; bounded 1992-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "source_supported"
+    },
+    {
+      "id": "gs",
+      "make": "LEXUS",
+      "model": "GS",
+      "year_start": 1998,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lexus_GS",
+      "excerpt": "executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LEXUS/GS; bounded 1998-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "draft"
+    },
+    {
+      "id": "ls",
+      "make": "LEXUS",
+      "model": "LS",
+      "year_start": 1991,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lexus_LS",
+      "excerpt": "full-size luxury sedan",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LEXUS/LS; bounded 1991-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "source_supported"
+    },
+    {
+      "id": "a8",
+      "make": "AUDI",
+      "model": "A8",
+      "year_start": 1997,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Audi_A8",
+      "excerpt": "full-size luxury sedan",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded AUDI/A8; bounded 1997-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "source_supported"
+    },
+    {
+      "id": "cts",
+      "make": "CADILLAC",
+      "model": "CTS",
+      "year_start": 2005,
+      "year_end": 2019,
+      "url": "https://en.wikipedia.org/wiki/Cadillac_CTS",
+      "excerpt": "luxury car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded CADILLAC/CTS; bounded 2005-2019 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "source_supported"
+    },
+    {
+      "id": "eclass-draft",
+      "make": "MERCEDES-BENZ",
+      "model": "E-CLASS",
+      "year_start": 1994,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Mercedes-Benz_E-Class",
+      "excerpt": "range of executive cars",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded MERCEDES-BENZ/E-CLASS; bounded 1994-2021 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "draft"
+    },
+    {
+      "id": "5series-draft",
+      "make": "BMW",
+      "model": "5 SERIES",
+      "year_start": 1990,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/BMW_5_Series",
+      "excerpt": "Executive car (E)",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded BMW/5 SERIES; bounded 1990-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "draft"
+    },
+    {
+      "id": "mustang-draft",
+      "make": "FORD",
+      "model": "MUSTANG",
+      "year_start": 1981,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Ford_Mustang",
+      "excerpt": "Pony car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded FORD/MUSTANG; bounded 1981-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "muscle_car"
+        }
+      ],
+      "status": "draft"
+    },
+    {
+      "id": "mkz",
+      "make": "LINCOLN",
+      "model": "MKZ",
+      "year_start": 2007,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lincoln_MKZ",
+      "excerpt": "Mid-size luxury car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LINCOLN/MKZ, 2007-2020; explicit named model-line classification only; no outside-year or other-model propagation.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        },
+        {
+          "dimension": "size_segment",
+          "label": "midsize"
+        }
+      ]
+    },
+    {
+      "id": "rc",
+      "make": "LEXUS",
+      "model": "RC",
+      "year_start": 2015,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lexus_RC",
+      "excerpt": "Compact executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LEXUS/RC, 2015-2020; explicit named model-line classification only; no outside-year or other-model propagation.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "crosswalk": "compact_executive",
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ]
+    },
+    {
+      "id": "clclass",
+      "make": "MERCEDES-BENZ",
+      "model": "CL-CLASS",
+      "year_start": 1999,
+      "year_end": 2013,
+      "url": "https://en.wikipedia.org/wiki/Mercedes-Benz_CL-Class",
+      "excerpt": "grand tourers ... Coupé Luxusklasse (Coupé-Luxury)",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded MERCEDES-BENZ/CL-CLASS, 1999-2013; explicit named model-line classification only; no outside-year or other-model propagation.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        },
+        {
+          "dimension": "performance_character",
+          "label": "grand_tourer"
+        }
+      ]
+    }
+  ],
+  "notice": "A bounded initial evidence seed, not exhaustive model coverage. Published dates unknown for live encyclopedia pages. Claims are source-supported, not independently validated. Draft claims never assign a label."
+}

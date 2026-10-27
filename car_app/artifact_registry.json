@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "similarity_run": "vehicle_similarity_v5/20261026-repair/run-reconciled",
+  "active_price": {
+    "run": "base/20261009T171630407257Z-full",
+    "model": "catboost",
+    "metadata_sha256": "44d7a8d3b99310503a8f26edce00c9e7e708db229cd817a7de0df7b9097eaae0",
+    "predictor_sha256": "b6a0433a114e78fa1674621e1f263ac738f9bccc45433292ae24daf941e6403e",
+    "selection_metric": "validation_mae_usd"
+  },
+  "comparison_report": "MODEL_OUTPUT\\comparisons\\20261024-app-feature-review",
+  "comparison_manifest_sha256": "19504c10414009935bf9ed831873195e9739592b46c4229a62aba1a73d07b0cb",
+  "similarity_manifest_sha256": "b1a76f0c0f4079d48b54b2d6ebc7055a065d6b66555812fc1376ddf516b37da9",
+  "preferred_similarity_approaches": {
+    "cohort": "direct_specs",
+    "model": "direct_specs"
+  },
+  "category_hierarchy_run": "vehicle_similarity_v5/20261026-epa-hierarchy-supported-validated",
+  "category_hierarchy_manifest_sha256": "79c763c581736135ff36cb23e7068b08312d3f6e1728991d85f79e6f32b62137"
+}

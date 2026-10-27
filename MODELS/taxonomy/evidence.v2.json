@@ -1,0 +1,1586 @@
+{
+  "taxonomy_version": "2.0.0",
+  "sources": [
+    {
+      "id": "mx5",
+      "make": "MAZDA",
+      "model": "MX-5",
+      "year_start": 2011,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Mazda_MX-5",
+      "excerpt": "lightweight two-seat sports car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded MAZDA/MX-5; bounded 2011-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "911",
+      "make": "PORSCHE",
+      "model": "911",
+      "year_start": 1985,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Porsche_911",
+      "excerpt": "two-door high performance rear-engined sports car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded PORSCHE/911; bounded 1985-2021 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "corvette",
+      "make": "CHEVROLET",
+      "model": "CORVETTE",
+      "year_start": 1981,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Chevrolet_Corvette",
+      "excerpt": "line of American two-door, two-seater sports cars",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded CHEVROLET/CORVETTE; bounded 1981-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "aventador",
+      "make": "LAMBORGHINI",
+      "model": "AVENTADOR",
+      "year_start": 2015,
+      "year_end": 2020,
+      "url": "https://www.lamborghini.com/en-en/history/aventador",
+      "excerpt": "a true supercar legend in the making",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LAMBORGHINI/AVENTADOR; bounded 2015-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "supercar"
+        }
+      ]
+    },
+    {
+      "id": "aventador-sports",
+      "make": "LAMBORGHINI",
+      "model": "AVENTADOR",
+      "year_start": 2015,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lamborghini_Aventador",
+      "excerpt": "mid-engine, two-seater sports car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LAMBORGHINI/AVENTADOR; bounded 2015-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "gallardo",
+      "make": "LAMBORGHINI",
+      "model": "GALLARDO",
+      "year_start": 2010,
+      "year_end": 2014,
+      "url": "https://en.wikipedia.org/wiki/Lamborghini_Gallardo",
+      "excerpt": "Sports car (S)",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LAMBORGHINI/GALLARDO; bounded 2010-2014 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "huracan",
+      "make": "LAMBORGHINI",
+      "model": "HURACAN",
+      "year_start": 2015,
+      "year_end": 2019,
+      "url": "https://en.wikipedia.org/wiki/Lamborghini_Hurac%C3%A1n",
+      "excerpt": "Sports car (S)",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LAMBORGHINI/HURACAN; bounded 2015-2019 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "sclass",
+      "make": "MERCEDES-BENZ",
+      "model": "S-CLASS",
+      "year_start": 1994,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Mercedes-Benz_S-Class",
+      "excerpt": "series of full-sized luxury sedans and coup\u00c3\u00a9s",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded MERCEDES-BENZ/S-CLASS; bounded 1994-2021 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        },
+        {
+          "dimension": "size_segment",
+          "label": "large"
+        }
+      ]
+    },
+    {
+      "id": "escalade",
+      "make": "CADILLAC",
+      "model": "ESCALADE",
+      "year_start": 2000,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Cadillac_Escalade",
+      "excerpt": "full-size luxury SUV",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded CADILLAC/ESCALADE; bounded 2000-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        },
+        {
+          "dimension": "size_segment",
+          "label": "large_suv"
+        }
+      ],
+      "body_styles": [
+        "suv_crossover"
+      ]
+    },
+    {
+      "id": "x5",
+      "make": "BMW",
+      "model": "X5",
+      "year_start": 2000,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/BMW_X5",
+      "excerpt": "Mid-size luxury crossover SUV",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded BMW/X5; bounded 2000-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        },
+        {
+          "dimension": "size_segment",
+          "label": "midsize_suv"
+        }
+      ]
+    },
+    {
+      "id": "rx",
+      "make": "LEXUS",
+      "model": "RX",
+      "year_start": 2004,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lexus_RX",
+      "excerpt": "Mid-size luxury crossover SUV (2003\u00e2\u20ac\u201cpresent)",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LEXUS/RX; bounded 2004-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        },
+        {
+          "dimension": "size_segment",
+          "label": "midsize_suv"
+        }
+      ]
+    },
+    {
+      "id": "civic",
+      "make": "HONDA",
+      "model": "CIVIC",
+      "year_start": 2001,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Honda_Civic",
+      "excerpt": "since 2000 the Civic has been categorized as a compact car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded HONDA/CIVIC; bounded 2001-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "compact"
+        }
+      ]
+    },
+    {
+      "id": "versa2020",
+      "make": "NISSAN",
+      "model": "VERSA",
+      "year_start": 2020,
+      "year_end": 2020,
+      "url": "https://usa.nissannews.com/en-US/releases/us-2020-nissan-versa-press-kit",
+      "excerpt": "entry-level buyers at a highly affordable price",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded NISSAN/VERSA; bounded 2020-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "economy"
+        }
+      ]
+    },
+    {
+      "id": "panamera2017",
+      "make": "PORSCHE",
+      "model": "PANAMERA",
+      "year_start": 2017,
+      "year_end": 2017,
+      "url": "https://newsroom.porsche.com/en_US/products/new-2017-panamera-19909.html",
+      "excerpt": "grand touring automobile ... comfort of a luxury sedan",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded PORSCHE/PANAMERA; bounded 2017-2017 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "grand_tourer"
+        },
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ]
+    },
+    {
+      "id": "cclass",
+      "make": "MERCEDES-BENZ",
+      "model": "C-CLASS",
+      "year_start": 1995,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Mercedes-Benz_C-Class",
+      "excerpt": "Compact executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded MERCEDES-BENZ/C-CLASS; bounded 1995-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ],
+      "crosswalk": "compact_executive"
+    },
+    {
+      "id": "3series",
+      "make": "BMW",
+      "model": "3 SERIES",
+      "year_start": 1990,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/BMW_3_Series",
+      "excerpt": "Compact executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded BMW/3 SERIES; bounded 1990-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ],
+      "crosswalk": "compact_executive"
+    },
+    {
+      "id": "is",
+      "make": "LEXUS",
+      "model": "IS",
+      "year_start": 2001,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lexus_IS",
+      "excerpt": "Compact executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LEXUS/IS; bounded 2001-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ],
+      "crosswalk": "compact_executive"
+    },
+    {
+      "id": "a4",
+      "make": "AUDI",
+      "model": "A4",
+      "year_start": 1996,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Audi_A4",
+      "excerpt": "Compact executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded AUDI/A4; bounded 1996-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ],
+      "crosswalk": "compact_executive"
+    },
+    {
+      "id": "ats",
+      "make": "CADILLAC",
+      "model": "ATS",
+      "year_start": 2013,
+      "year_end": 2019,
+      "url": "https://en.wikipedia.org/wiki/Cadillac_ATS",
+      "excerpt": "Compact executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded CADILLAC/ATS; bounded 2013-2019 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ],
+      "crosswalk": "compact_executive"
+    },
+    {
+      "id": "es",
+      "make": "LEXUS",
+      "model": "ES",
+      "year_start": 1992,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lexus_ES",
+      "excerpt": "mid-size luxury",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LEXUS/ES; bounded 1992-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "source_supported"
+    },
+    {
+      "id": "gs",
+      "make": "LEXUS",
+      "model": "GS",
+      "year_start": 1998,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lexus_GS",
+      "excerpt": "executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LEXUS/GS; bounded 1998-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "draft"
+    },
+    {
+      "id": "ls",
+      "make": "LEXUS",
+      "model": "LS",
+      "year_start": 1991,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lexus_LS",
+      "excerpt": "full-size luxury sedan",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LEXUS/LS; bounded 1991-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "source_supported"
+    },
+    {
+      "id": "a8",
+      "make": "AUDI",
+      "model": "A8",
+      "year_start": 1997,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Audi_A8",
+      "excerpt": "full-size luxury sedan",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded AUDI/A8; bounded 1997-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "source_supported"
+    },
+    {
+      "id": "cts",
+      "make": "CADILLAC",
+      "model": "CTS",
+      "year_start": 2005,
+      "year_end": 2019,
+      "url": "https://en.wikipedia.org/wiki/Cadillac_CTS",
+      "excerpt": "luxury car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded CADILLAC/CTS; bounded 2005-2019 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "source_supported"
+    },
+    {
+      "id": "eclass-draft",
+      "make": "MERCEDES-BENZ",
+      "model": "E-CLASS",
+      "year_start": 1994,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Mercedes-Benz_E-Class",
+      "excerpt": "range of executive cars",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded MERCEDES-BENZ/E-CLASS; bounded 1994-2021 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "draft"
+    },
+    {
+      "id": "5series-draft",
+      "make": "BMW",
+      "model": "5 SERIES",
+      "year_start": 1990,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/BMW_5_Series",
+      "excerpt": "Executive car (E)",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded BMW/5 SERIES; bounded 1990-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window. Identity-only manufacturer mappings repair naming; executive positioning remains unresolved.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "status": "draft"
+    },
+    {
+      "id": "mustang-draft",
+      "make": "FORD",
+      "model": "MUSTANG",
+      "year_start": 1981,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Ford_Mustang",
+      "excerpt": "Pony car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded FORD/MUSTANG; bounded 1981-2020 model-year window. Source describes the named model line, not its manufacturer. No propagation beyond this window.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "muscle_car"
+        }
+      ],
+      "status": "draft"
+    },
+    {
+      "id": "mkz",
+      "make": "LINCOLN",
+      "model": "MKZ",
+      "year_start": 2007,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lincoln_MKZ",
+      "excerpt": "Mid-size luxury car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LINCOLN/MKZ, 2007-2020; explicit named model-line classification only; no outside-year or other-model propagation.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        },
+        {
+          "dimension": "size_segment",
+          "label": "midsize"
+        }
+      ]
+    },
+    {
+      "id": "rc",
+      "make": "LEXUS",
+      "model": "RC",
+      "year_start": 2015,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lexus_RC",
+      "excerpt": "Compact executive car",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded LEXUS/RC, 2015-2020; explicit named model-line classification only; no outside-year or other-model propagation.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "crosswalk": "compact_executive",
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ]
+    },
+    {
+      "id": "clclass",
+      "make": "MERCEDES-BENZ",
+      "model": "CL-CLASS",
+      "year_start": 1999,
+      "year_end": 2013,
+      "url": "https://en.wikipedia.org/wiki/Mercedes-Benz_CL-Class",
+      "excerpt": "grand tourers ... Coup\u00c3\u00a9 Luxusklasse (Coup\u00c3\u00a9-Luxury)",
+      "retrieved_at": "2026-10-23",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact decoded MERCEDES-BENZ/CL-CLASS, 1999-2013; explicit named model-line classification only; no outside-year or other-model propagation.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        },
+        {
+          "dimension": "performance_character",
+          "label": "grand_tourer"
+        }
+      ]
+    },
+    {
+      "id": "batch001-ford-escape",
+      "make": "FORD",
+      "model": "ESCAPE",
+      "year_start": 2001,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Ford_Escape",
+      "excerpt": "Compact crossover SUV",
+      "retrieved_at": "2026-10-23T19:32:54.695956+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2001\u20132026 (North America). Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-toyota-highlander",
+      "make": "TOYOTA",
+      "model": "HIGHLANDER",
+      "year_start": 2001,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Toyota_Highlander",
+      "excerpt": "Mid-size crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:02.468605+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2001\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "midsize_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-hyundai-tucson",
+      "make": "HYUNDAI",
+      "model": "TUCSON",
+      "year_start": 2005,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Hyundai_Tucson",
+      "excerpt": "Compact crossover SUV ( C )",
+      "retrieved_at": "2026-10-23T19:33:04.527385+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2005\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-mazda-cx-5",
+      "make": "MAZDA",
+      "model": "CX-5",
+      "year_start": 2013,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Mazda_CX-5",
+      "excerpt": "Compact crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:07.813169+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2013\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-jeep-compass",
+      "make": "JEEP",
+      "model": "COMPASS",
+      "year_start": 2007,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Jeep_Compass",
+      "excerpt": "Compact crossover SUV ( C )",
+      "retrieved_at": "2026-10-23T19:33:09.382989+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2007\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-honda-pilot",
+      "make": "HONDA",
+      "model": "PILOT",
+      "year_start": 2003,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Honda_Pilot",
+      "excerpt": "Mid-size crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:10.377592+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2003\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "midsize_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-kia-soul",
+      "make": "KIA",
+      "model": "SOUL",
+      "year_start": 2010,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Kia_Soul",
+      "excerpt": "Subcompact crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:13.204817+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2009\u20132025. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-ford-mustang",
+      "make": "FORD",
+      "model": "MUSTANG",
+      "year_start": 1983,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Ford_Mustang",
+      "excerpt": "Pony car , muscle car ( America ) Roadster sport ( Europe ) Sports car (international)",
+      "retrieved_at": "2026-10-23T19:33:14.928373+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 1965\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        },
+        {
+          "dimension": "performance_character",
+          "label": "muscle_car"
+        }
+      ]
+    },
+    {
+      "id": "batch001-buick-encore",
+      "make": "BUICK",
+      "model": "ENCORE",
+      "year_start": 2013,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Buick_Encore",
+      "excerpt": "Subcompact crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:19.817191+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2013\u20132022. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-chevrolet-cruze",
+      "make": "CHEVROLET",
+      "model": "CRUZE",
+      "year_start": 2011,
+      "year_end": 2019,
+      "url": "https://en.wikipedia.org/wiki/Chevrolet_Cruze",
+      "excerpt": "Compact car ( C )",
+      "retrieved_at": "2026-10-23T19:33:20.651121+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2011\u20132019 (North America). Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "compact"
+        }
+      ]
+    },
+    {
+      "id": "batch001-hyundai-kona",
+      "make": "HYUNDAI",
+      "model": "KONA",
+      "year_start": 2018,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Hyundai_Kona",
+      "excerpt": "Subcompact crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:22.769397+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2018\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-volkswagen-tiguan",
+      "make": "VOLKSWAGEN",
+      "model": "TIGUAN",
+      "year_start": 2009,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Volkswagen_Tiguan",
+      "excerpt": "Compact crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:23.745423+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2009\u2013present (North America). Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-buick-encore-gx",
+      "make": "BUICK",
+      "model": "ENCORE GX",
+      "year_start": 2020,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Buick_Encore_GX",
+      "excerpt": "Subcompact crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:26.604528+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2020\u2013present (North America). Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-ford-expedition",
+      "make": "FORD",
+      "model": "EXPEDITION",
+      "year_start": 1997,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Ford_Expedition",
+      "excerpt": "Full-size SUV",
+      "retrieved_at": "2026-10-23T19:33:27.473018+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 1997\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "large_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-ford-focus",
+      "make": "FORD",
+      "model": "FOCUS",
+      "year_start": 2000,
+      "year_end": 2018,
+      "url": "https://en.wikipedia.org/wiki/Ford_Focus",
+      "excerpt": "Small family car / Compact car ( C )",
+      "retrieved_at": "2026-10-23T19:33:30.837896+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2000\u20132018 (North America). Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "compact"
+        }
+      ]
+    },
+    {
+      "id": "batch001-buick-envision",
+      "make": "BUICK",
+      "model": "ENVISION",
+      "year_start": 2016,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Buick_Envision",
+      "excerpt": "Compact crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:31.811985+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2016\u2013present (North America). Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-cadillac-xt5",
+      "make": "CADILLAC",
+      "model": "XT5",
+      "year_start": 2017,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Cadillac_XT5",
+      "excerpt": "Compact luxury crossover SUV ( D )",
+      "retrieved_at": "2026-10-23T19:33:32.527595+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2016\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ]
+    },
+    {
+      "id": "batch001-subaru-crosstrek",
+      "make": "SUBARU",
+      "model": "CROSSTREK",
+      "year_start": 2016,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Subaru_Crosstrek",
+      "excerpt": "Compact crossover SUV ( C )",
+      "retrieved_at": "2026-10-23T19:33:33.317830+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2013\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-nissan-murano",
+      "make": "NISSAN",
+      "model": "MURANO",
+      "year_start": 2003,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Nissan_Murano",
+      "excerpt": "Mid-size crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:38.012379+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2003\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "midsize_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-toyota-tundra",
+      "make": "TOYOTA",
+      "model": "TUNDRA",
+      "year_start": 2000,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Toyota_Tundra",
+      "excerpt": "Full-size pickup truck",
+      "retrieved_at": "2026-10-23T19:33:39.385703+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2000\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "full_size_pickup"
+        }
+      ]
+    },
+    {
+      "id": "batch001-chrysler-300",
+      "make": "CHRYSLER",
+      "model": "300",
+      "year_start": 2005,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Chrysler_300",
+      "excerpt": "Full-size car ( E )",
+      "retrieved_at": "2026-10-23T19:33:41.049427+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2005\u20132023. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "large"
+        }
+      ]
+    },
+    {
+      "id": "batch001-volkswagen-atlas",
+      "make": "VOLKSWAGEN",
+      "model": "ATLAS",
+      "year_start": 2018,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Volkswagen_Atlas",
+      "excerpt": "Mid-size crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:42.884450+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2018\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "midsize_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-acura-rdx",
+      "make": "ACURA",
+      "model": "RDX",
+      "year_start": 2007,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Acura_RDX",
+      "excerpt": "Compact luxury crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:43.694467+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2007\u20132026. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ]
+    },
+    {
+      "id": "batch001-lincoln-mkz",
+      "make": "LINCOLN",
+      "model": "MKZ",
+      "year_start": 2007,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lincoln_MKZ",
+      "excerpt": "Mid-size luxury car",
+      "retrieved_at": "2026-10-23T19:33:48.465801+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2006\u20132020. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ]
+    },
+    {
+      "id": "batch001-kia-rio",
+      "make": "KIA",
+      "model": "RIO",
+      "year_start": 2001,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Kia_Rio",
+      "excerpt": "Subcompact car ( B )",
+      "retrieved_at": "2026-10-23T19:33:49.455659+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2001\u20132023 (North America). Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "subcompact"
+        }
+      ]
+    },
+    {
+      "id": "batch001-cadillac-xt6",
+      "make": "CADILLAC",
+      "model": "XT6",
+      "year_start": 2020,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Cadillac_XT6",
+      "excerpt": "Mid-size luxury crossover SUV ( E )",
+      "retrieved_at": "2026-10-23T19:33:50.725244+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2020\u20132025 (North America). Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ]
+    },
+    {
+      "id": "batch001-hyundai-venue",
+      "make": "HYUNDAI",
+      "model": "VENUE",
+      "year_start": 2020,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Hyundai_Venue",
+      "excerpt": "Subcompact crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:53.100715+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2020\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-kia-niro",
+      "make": "KIA",
+      "model": "NIRO",
+      "year_start": 2017,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Kia_Niro",
+      "excerpt": "Subcompact crossover SUV",
+      "retrieved_at": "2026-10-23T19:33:53.911721+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2017\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-chevrolet-volt",
+      "make": "CHEVROLET",
+      "model": "VOLT",
+      "year_start": 2011,
+      "year_end": 2019,
+      "url": "https://en.wikipedia.org/wiki/Chevrolet_Volt",
+      "excerpt": "Compact car ( C )",
+      "retrieved_at": "2026-10-23T19:33:56.670133+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2011\u20132019. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "compact"
+        }
+      ]
+    },
+    {
+      "id": "batch001-toyota-fj-cruiser",
+      "make": "TOYOTA",
+      "model": "FJ CRUISER",
+      "year_start": 2007,
+      "year_end": 2014,
+      "url": "https://en.wikipedia.org/wiki/Toyota_FJ_Cruiser",
+      "excerpt": "Mid-size SUV",
+      "retrieved_at": "2026-10-23T19:34:02.546421+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2007\u20132014 (North America). Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "midsize_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-pontiac-firebird",
+      "make": "PONTIAC",
+      "model": "FIREBIRD",
+      "year_start": 1981,
+      "year_end": 2002,
+      "url": "https://en.wikipedia.org/wiki/Pontiac_Firebird",
+      "excerpt": "Pony car Muscle car",
+      "retrieved_at": "2026-10-23T19:34:08.987745+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 1967\u20132002. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "muscle_car"
+        }
+      ]
+    },
+    {
+      "id": "batch001-toyota-t100",
+      "make": "TOYOTA",
+      "model": "T100",
+      "year_start": 1993,
+      "year_end": 1997,
+      "url": "https://en.wikipedia.org/wiki/Toyota_T100",
+      "excerpt": "Full-size pickup truck",
+      "retrieved_at": "2026-10-23T19:34:10.230034+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 1993\u20131998. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "full_size_pickup"
+        }
+      ]
+    },
+    {
+      "id": "batch001-jeep-comanche",
+      "make": "JEEP",
+      "model": "COMANCHE",
+      "year_start": 1987,
+      "year_end": 1989,
+      "url": "https://en.wikipedia.org/wiki/Jeep_Comanche",
+      "excerpt": "Compact pickup truck",
+      "retrieved_at": "2026-10-23T19:34:10.880748+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 1986\u20131992. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_pickup"
+        }
+      ]
+    },
+    {
+      "id": "batch001-lincoln-nautilus",
+      "make": "LINCOLN",
+      "model": "NAUTILUS",
+      "year_start": 2019,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lincoln_Nautilus",
+      "excerpt": "Mid-size luxury crossover SUV",
+      "retrieved_at": "2026-10-23T19:34:11.649662+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2019\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ]
+    },
+    {
+      "id": "batch001-kia-k5",
+      "make": "KIA",
+      "model": "K5",
+      "year_start": 2021,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Kia_K5",
+      "excerpt": "Mid-size car ( D )",
+      "retrieved_at": "2026-10-23T19:34:12.583454+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2001\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "midsize"
+        }
+      ]
+    },
+    {
+      "id": "batch001-lexus-nx",
+      "make": "LEXUS",
+      "model": "NX",
+      "year_start": 2015,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Lexus_NX_200t",
+      "excerpt": "Compact luxury crossover SUV",
+      "retrieved_at": "2026-10-23T19:34:13.795387+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2015\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ]
+    },
+    {
+      "id": "batch001-chrysler-200",
+      "make": "CHRYSLER",
+      "model": "200",
+      "year_start": 2011,
+      "year_end": 2017,
+      "url": "https://en.wikipedia.org/wiki/Chrysler_200",
+      "excerpt": "Mid-size car",
+      "retrieved_at": "2026-10-23T19:34:14.854295+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2011\u20132017. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "midsize"
+        }
+      ]
+    },
+    {
+      "id": "batch001-hyundai-ioniq",
+      "make": "HYUNDAI",
+      "model": "IONIQ",
+      "year_start": 2017,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Hyundai_Ioniq_Hybrid",
+      "excerpt": "Compact car ( C )",
+      "retrieved_at": "2026-10-23T19:34:16.707178+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2017\u20132022. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "compact"
+        }
+      ]
+    },
+    {
+      "id": "batch001-hummer-h3",
+      "make": "HUMMER",
+      "model": "H3",
+      "year_start": 2006,
+      "year_end": 2010,
+      "url": "https://en.wikipedia.org/wiki/Hummer_H3",
+      "excerpt": "Mid-size SUV mid-size pickup truck (H3T)",
+      "retrieved_at": "2026-10-23T19:34:19.029787+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2006\u20132010. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "midsize_suv"
+        }
+      ]
+    },
+    {
+      "id": "batch001-buick-lucerne",
+      "make": "BUICK",
+      "model": "LUCERNE",
+      "year_start": 2006,
+      "year_end": 2011,
+      "url": "https://en.wikipedia.org/wiki/Buick_Lucerne",
+      "excerpt": "Full-size car",
+      "retrieved_at": "2026-10-23T19:34:20.271733+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2006\u20132011. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "large"
+        }
+      ]
+    },
+    {
+      "id": "batch001-toyota-prius-c",
+      "make": "TOYOTA",
+      "model": "PRIUS C",
+      "year_start": 2012,
+      "year_end": 2019,
+      "url": "https://en.wikipedia.org/wiki/Toyota_Prius_c",
+      "excerpt": "Subcompact car ( B )",
+      "retrieved_at": "2026-10-23T19:34:21.223729+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2012\u20132019 (US). Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "subcompact"
+        }
+      ]
+    },
+    {
+      "id": "batch001-ferrari-f355",
+      "make": "FERRARI",
+      "model": "F355",
+      "year_start": 1996,
+      "year_end": 1999,
+      "url": "https://en.wikipedia.org/wiki/Ferrari_F355",
+      "excerpt": "Sports car ( S )",
+      "retrieved_at": "2026-10-23T19:34:26.114848+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 1995\u20131999. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "batch001-lincoln-corsair",
+      "make": "LINCOLN",
+      "model": "CORSAIR",
+      "year_start": 2020,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Lincoln_Corsair",
+      "excerpt": "Compact luxury crossover SUV ( C )",
+      "retrieved_at": "2026-10-23T19:34:29.367342+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2020\u2013present. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ]
+    },
+    {
+      "id": "batch001-toyota-avalon",
+      "make": "TOYOTA",
+      "model": "AVALON",
+      "year_start": 1995,
+      "year_end": 2021,
+      "url": "https://en.wikipedia.org/wiki/Toyota_Avalon",
+      "excerpt": "Full-size car",
+      "retrieved_at": "2026-10-23T19:34:33.456903+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 1995\u20132022 (US). Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "large"
+        }
+      ]
+    },
+    {
+      "id": "batch001-pontiac-g6",
+      "make": "PONTIAC",
+      "model": "G6",
+      "year_start": 2005,
+      "year_end": 2010,
+      "url": "https://en.wikipedia.org/wiki/Pontiac_G6",
+      "excerpt": "Mid-size car",
+      "retrieved_at": "2026-10-23T19:34:35.378472+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2005\u20132010. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "midsize"
+        }
+      ]
+    },
+    {
+      "id": "batch001-lexus-hs",
+      "make": "LEXUS",
+      "model": "HS",
+      "year_start": 2010,
+      "year_end": 2012,
+      "url": "https://en.wikipedia.org/wiki/Lexus_HS_250h",
+      "excerpt": "Compact executive car ( D )",
+      "retrieved_at": "2026-10-23T19:34:37.674084+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2010\u20132012 (North America). Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "market_positioning",
+          "label": "luxury"
+        }
+      ],
+      "crosswalk": "compact_executive_to_luxury",
+      "supporting_urls": [
+        "https://en.wikipedia.org/wiki/Compact_executive_car"
+      ]
+    },
+    {
+      "id": "batch001-lamborghini-aventador",
+      "make": "LAMBORGHINI",
+      "model": "AVENTADOR",
+      "year_start": 2012,
+      "year_end": 2020,
+      "url": "https://en.wikipedia.org/wiki/Lamborghini_Aventador",
+      "excerpt": "Sports car ( S )",
+      "retrieved_at": "2026-10-23T19:34:38.612001+00:00",
+      "published_at": null,
+      "all_trims": true,
+      "scope_note": "Exact named model line; explicit source model-year range: 2012\u20132022. Retained observed year bounds applied; body compatibility screened separately.",
+      "claims": [
+        {
+          "dimension": "performance_character",
+          "label": "sports_car"
+        }
+      ]
+    },
+    {
+      "id": "honda-fit-2020",
+      "make": "HONDA",
+      "model": "FIT",
+      "year_start": 2020,
+      "year_end": 2020,
+      "url": "https://hondanews.com/en-US/honda-automobiles/releases/release-8d5607d2f6277f4e7a40db546204e024-fun-and-affordable-2020-honda-fit-arrives-in-showrooms",
+      "excerpt": "2020 Honda Fit ... benchmark in the subcompact car category",
+      "retrieved_at": "2026-10-23",
+      "published_at": "2019-12-13",
+      "all_trims": true,
+      "scope_note": "2020 US model; subcompact size only, affordable does not independently establish economy positioning.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "subcompact"
+        }
+      ]
+    },
+    {
+      "id": "honda-crv-2020",
+      "make": "HONDA",
+      "model": "CR-V",
+      "year_start": 2020,
+      "year_end": 2020,
+      "url": "https://hondanews.com/en-US/honda-automobiles/releases/release-f14e4d95353ee177f9926a59c700267f-2020-honda-cr-v-americas-most-popular-cuv-gets-new-us-built-hybrid-electric-version-standard-honda-sensing-and-freshened-styling",
+      "excerpt": "2020 model ... leader in the compact SUV market",
+      "retrieved_at": "2026-10-23",
+      "published_at": "2019-09-18",
+      "all_trims": true,
+      "scope_note": "2020 US CR-V, both documented non-hybrid and hybrid variants; size applies only to supported SUV body profiles.",
+      "claims": [
+        {
+          "dimension": "size_segment",
+          "label": "small_suv"
+        }
+      ]
+    }
+  ],
+  "notice": "A bounded initial evidence seed, not exhaustive model coverage. Published dates unknown for live encyclopedia pages. Claims are source-supported, not independently validated. Draft claims never assign a label.",
+  "reference_batch": {
+    "directory": "MODEL_OUTPUT/vehicle_taxonomy_v2/20261023-reference-batch-001-direct",
+    "hashes": {
+      "reference_results.json": "1118e637dda451064b8f89259eac67f51e20c5a97719b4bd5566083a4f6783bf",
+      "receipt.json": "0d297490f5bbc3c4d4768a871c04f8f296005775c7a9b33bf22ef7542cf2afc4",
+      "selection.csv": "f8d80e5e92c0d680d7459ea799bc7197de76c68ab7e71f61f25b49fb9d19b75e"
+    }
+  }
+}

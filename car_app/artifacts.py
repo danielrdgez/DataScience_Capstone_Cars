@@ -11,10 +11,11 @@ import pandas as pd
 import polars as pl
 import streamlit as st
 
-from car_app.data import ROOT, COHORT, Filters, snapshot
+from car_app.data import ROOT, COHORT, Filters, snapshot, EXCLUDED_LISTING_VINS
 
-DEFAULT_BASE = "base/20260930T002248817124Z-pilot-100000"
-DEFAULT_ENRICHED = "enriched/20260930T011439171946Z-pilot-100000"
+DEFAULT_BASE = "base/20261009T171630407257Z-full"
+DEFAULT_ENRICHED = "enhanced/20261011T050517300002Z-full"
+DEFAULT_PCR = "full/20261024T154353886346Z-full"
 
 
 @dataclass
@@ -37,10 +38,12 @@ class Run:
         file = self.path / name
         return pd.read_csv(file) if file.is_file() and file.stat().st_size > 2 else pd.DataFrame()
 
-    def prediction_path(self, model):
+    def prediction_path(self, model, partition="test"):
+        if partition not in {"test", "validation"}:
+            raise ValueError("Unsupported evaluation partition")
         if model not in set(self.table("metrics.csv").get("model", [])):
             return None
-        file = self.path / f"{model}_test_predictions.parquet"
+        file = self.path / f"{model}_{partition}_predictions.parquet"
         return file if file.is_file() else None
 
 
@@ -55,7 +58,7 @@ def inventory(refresh=0):
                 ignored.append((str(file.parent.relative_to(ROOT / "MODEL_OUTPUT")), status))
                 continue
             legacy = status is None or (meta.get("model_type") is not None
-                                         and meta.get("preprocessing_version") != "advertised-price-log-v3")
+                                         and meta.get("preprocessing_version") != "advertised-price-log-v4")
             run = Run(file.parent, meta, legacy)
             if not run.table("metrics.csv").empty or not run.table("validation_metrics.csv").empty:
                 runs.append(run)
@@ -96,7 +99,7 @@ def selected_vins(source_identity: str, filters: Filters):
 
 @st.cache_data(max_entries=24, ttl=900, show_spinner=False)
 def evaluation(file: str, signature: tuple, source_identity: str, filters: Filters):
-    predictions = pl.scan_parquet(file)
+    predictions = pl.scan_parquet(file).filter(~pl.col("vin").is_in(sorted(EXCLUDED_LISTING_VINS)))
     if filters.active():
         # Use the frozen receipt for cohort identity/actual price; current source
         # attributes may supplement filters only after snapshot hashes agree.
@@ -109,6 +112,29 @@ def evaluation(file: str, signature: tuple, source_identity: str, filters: Filte
     if frame.vin.duplicated().any():
         raise ValueError("Duplicate evaluation VINs")
     return frame
+
+
+def evaluation_with_fallback(file, signature, source_identity, filters, minimum_rows=100):
+    """Broaden display scope explicitly; never alter saved predictions or sidebar state."""
+    scopes = [("Selected filters", filters)]
+    if filters.models:
+        scopes.append(("Make and model", Filters(makes=filters.makes, models=filters.models)))
+    if filters.makes:
+        scopes.append(("Make", Filters(makes=filters.makes)))
+    seen = set()
+    first_rows = None
+    used_label = "Selected filters"
+    for label, scope in scopes:
+        if scope in seen:
+            continue
+        seen.add(scope)
+        used_label = label
+        frame = evaluation(file, signature, source_identity, scope)
+        if first_rows is None:
+            first_rows = len(frame)
+        if len(frame) >= minimum_rows:
+            return frame, label, first_rows
+    return frame, used_label, first_rows
 
 
 def paired_comparison(left: Run, right: Run, filters, source_identity):
@@ -154,13 +180,21 @@ def hash_file(path: str, signature: tuple):
 
 
 def validate_sources(metadata):
+    from car_app.model_registry import COMMON_SOURCES, price_sources
+
     hashes = metadata.get("source_file_sha256")
     if not hashes:
         raise ValueError("No snapshot hashes recorded; filtered evaluation/inference unavailable")
+    for name in hashes:
+        parts = Path(name).parts
+        if Path(name).is_absolute() or ".." in parts or (len(parts) > 1 and
+                not (len(parts) == 2 and parts[0] == "expert")):
+            raise ValueError("Invalid source reference in artifact metadata")
     source = snapshot()
+    paths = price_sources(metadata)
     for name, expected in hashes.items():
-        path = source.directory / name
-        if path.parent != source.directory or not path.is_file():
+        path = source.directory / name if name in COMMON_SOURCES else paths[name]
+        if not path.is_file():
             raise ValueError("Invalid source reference in artifact metadata")
         if hash_file(str(path), stat_key(path)) != expected:
             raise ValueError(f"Source fingerprint changed: {name}")
@@ -170,7 +204,60 @@ def validate_sources(metadata):
 
 
 def saved_shap(run, model):
+    """Read exact-model notebook caches, including forest impurity and coefficients."""
     if model not in set(run.table("metrics.csv").get("model", [])):
         return pd.DataFrame()
+    cache_root = ROOT / "MODEL_OUTPUT/diagnostics/model_evaluations/explanations"
+    for receipt in sorted(cache_root.glob("*/status.json"), key=lambda p: p.stat().st_mtime_ns, reverse=True):
+        try:
+            status = json.loads(receipt.read_text(encoding="utf-8"))
+            if (status.get("status") != "completed" or status.get("model") != model
+                    or Path(status.get("run", "")).resolve() != run.path.resolve()
+                    or status.get("frozen_hashes") != run.metadata.get("shap_input_sha256")):
+                continue
+            predictor = run.path / model / "predictor.joblib"
+            if hash_file(str(predictor), stat_key(predictor)) != status.get("predictor_sha256"):
+                continue
+            result = pd.read_csv(receipt.parent / "importance.csv")
+            result.attrs.update(method=status["method"], scale=status["scale"])
+            return result
+        except (OSError, ValueError, KeyError):
+            continue
     files = list(run.path.glob(f"{model}/{model}_shap_global.csv"))
-    return pd.read_csv(files[0]) if files else pd.DataFrame()
+    result = pd.read_csv(files[0]) if files else pd.DataFrame()
+    result.attrs.update(method="Saved SHAP importance", scale=run.metadata.get("shap_output_scale", "unrecorded"))
+    return result
+
+
+def diagnostic_inventory():
+    """Discover the newest completed full-data checkpoint for each feature set and estimator."""
+    from car_app.model_registry import VARIANTS
+    selected, inspected = {}, []
+    for variant in VARIANTS:
+        for file in sorted((ROOT / "MODEL_OUTPUT" / variant).glob("*-full/run_metadata.json")):
+            try:
+                metadata = json.loads(file.read_text(encoding="utf-8-sig"))
+                if metadata.get("requested_sample_size") is not None or metadata.get("model_type") != variant:
+                    continue
+                run = Run(file.parent, metadata)
+                scores = run.table("metrics.csv")
+                if "model" not in scores:
+                    continue
+                for model, receipt in metadata.get("models", {}).items():
+                    required = [file.parent / model / "predictor.joblib",
+                                file.parent / f"{model}_test_predictions.parquet",
+                                file.parent / f"{model}_validation_predictions.parquet"]
+                    score = scores[scores.model.eq(model)]
+                    if receipt.get("status") == "completed" and not score.empty and all(p.is_file() for p in required):
+                        selected[variant, model] = (run, score.iloc[0])
+            except (OSError, ValueError, pd.errors.ParserError) as exc:
+                inspected.append({"run": str(file.parent), "reason": str(exc)})
+    runs, rows = {}, []
+    for (variant, model), (run, score) in selected.items():
+        runs[run.name] = run
+        rows.append({"feature_set": variant, "model": model, "run": run.name,
+                     "label": f"{variant}-{model}", "run_status": run.metadata.get("status"),
+                     "validation_mae": score.get("validation_mae"),
+                     "test_mae": score.get("mae"), "test_rmse": score.get("rmse"),
+                     "test_r2": score.get("r2")})
+    return runs, pd.DataFrame(rows), pd.DataFrame(rows), pd.DataFrame(inspected)

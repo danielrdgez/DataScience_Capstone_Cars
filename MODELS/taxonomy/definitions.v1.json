@@ -1,0 +1,76 @@
+{
+  "version": "1.0.0",
+  "dimensions": {
+    "body_style": {
+      "sedan": "Sedan body style supported by observed cohort evidence.",
+      "hatchback": "Hatchback body style supported by observed cohort evidence.",
+      "wagon": "Wagon body style supported by observed cohort evidence.",
+      "coupe": "Coupe body style supported by observed cohort evidence.",
+      "convertible": "Convertible body style supported by observed cohort evidence.",
+      "suv_crossover": "Suv crossover body style supported by observed cohort evidence.",
+      "pickup": "Pickup body style supported by observed cohort evidence.",
+      "minivan": "Minivan body style supported by observed cohort evidence.",
+      "van": "Van body style supported by observed cohort evidence.",
+      "other": "Other body style supported by observed cohort evidence."
+    },
+    "size_segment": {
+      "minicompact": "Source-specific minicompact market segment; not an inferred EPA interior-volume class.",
+      "subcompact": "Source-specific subcompact market segment; not an inferred EPA interior-volume class.",
+      "compact": "Source-specific compact market segment; not an inferred EPA interior-volume class.",
+      "midsize": "Source-specific midsize market segment; not an inferred EPA interior-volume class.",
+      "large": "Source-specific large market segment; not an inferred EPA interior-volume class.",
+      "small_suv": "Source-specific small suv market segment; not an inferred EPA interior-volume class.",
+      "midsize_suv": "Source-specific midsize suv market segment; not an inferred EPA interior-volume class.",
+      "large_suv": "Source-specific large suv market segment; not an inferred EPA interior-volume class.",
+      "small_pickup": "Source-specific small pickup market segment; not an inferred EPA interior-volume class.",
+      "full_size_pickup": "Source-specific full size pickup market segment; not an inferred EPA interior-volume class."
+    },
+    "market_positioning": {
+      "economy": "Originally positioned for economical entry-level ownership; not low used asking price.",
+      "mainstream": "Explicitly sourced general-market positioning; never the default for an unknown vehicle.",
+      "premium": "Explicit premium positioning, retained separately from luxury.",
+      "luxury": "Model-specific positioning emphasizing luxury, comfort, materials or refinement; not make alone.",
+      "ultra_luxury": "Explicit ultra-luxury positioning; not inferred from high price."
+    },
+    "performance_character": {
+      "sport_oriented_variant": "Explicit model/variant description as sport oriented variant; horsepower or door count alone cannot establish this label.",
+      "sports_car": "Explicit model/variant description as sports car; horsepower or door count alone cannot establish this label.",
+      "muscle_car": "Explicit model/variant description as muscle car; horsepower or door count alone cannot establish this label.",
+      "grand_tourer": "Explicit model/variant description as grand tourer; horsepower or door count alone cannot establish this label.",
+      "supercar": "Explicit model/variant description as supercar; horsepower or door count alone cannot establish this label.",
+      "hypercar": "Explicit model/variant description as hypercar; horsepower or door count alone cannot establish this label."
+    },
+    "powertrain": {
+      "combustion": "Supported decoded electrification and fuel evidence for combustion.",
+      "hybrid": "Supported decoded electrification and fuel evidence for hybrid.",
+      "plug_in_hybrid": "Supported decoded electrification and fuel evidence for plug in hybrid.",
+      "battery_electric": "Supported decoded electrification and fuel evidence for battery electric.",
+      "other": "Supported decoded electrification and fuel evidence for other."
+    }
+  },
+  "terminology_sources": [
+    "https://en.wikipedia.org/wiki/Car_classification",
+    "https://en.wikipedia.org/wiki/Luxury_car",
+    "https://en.wikipedia.org/wiki/Sports_car",
+    "https://en.wikipedia.org/wiki/Supercar",
+    "https://www.fueleconomy.gov/feg/info.shtml#sizeclasses"
+  ],
+  "hierarchy": {
+    "hypercar": [
+      "supercar"
+    ]
+  },
+  "hierarchy_policy": "Relationships describe vocabulary only. Assignment of an additional label requires evidence; no automatic implication.",
+  "namespaces": [
+    "observed",
+    "market_terminology",
+    "epa_regulatory"
+  ],
+  "crosswalks": {
+    "compact_executive": {
+      "market_positioning": "luxury",
+      "source": "https://en.wikipedia.org/wiki/Compact_executive_car",
+      "evidence": "also known as a compact luxury car"
+    }
+  }
+}

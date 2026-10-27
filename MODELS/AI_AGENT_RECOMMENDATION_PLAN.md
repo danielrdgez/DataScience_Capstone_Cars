@@ -1,6 +1,6 @@
 # AI Agent Recommendation: research and system design
 
-Status: recommendation engine proposed; local dashboard and inactive integration panels implemented. Research reviewed October 8, 2026.
+Status: October 26, 2026. Independent requirements search, filter-aware v4 category/cluster similarity, explanatory diagrams and saved-model price inference are connected. Price training remains unchanged. Conversational AI calls remain disabled.
 
 ## Recommendation and boundaries
 
@@ -8,13 +8,23 @@ Build a constraint-based vehicle recommender with an LLM conversation layer. The
 
 Support two equal views: year/make/model/trim cohorts and individual historical listings. Use observed prices for hard budget limits and predicted prices as an additional value signal. Evaluate Jev for narrow semantic decisions before making it a dependency.
 
-The recommendation design specifies future work. The local dashboard is implemented separately; its recommendation panels make no API calls and perform no recommendation search or ranking. Hosted APIs are acceptable. The initial design uses the existing historical snapshot, not current inventory. Recommendation outputs below do not extend the selected price-model dataset.
+The local dashboard implements deterministic historical search, similarity, clusters and price estimates. The remaining conversational and utility-scoring designs below are future work. Hosted APIs remain deferred. The existing historical snapshot is not current inventory. Recommendation outputs do not extend the selected price-model dataset.
 
 ## Dashboard integration plan
 
+### Provisional category workflow (v4)
+
+The opt-in v4 CLI prepares VIN-supported variants with shared exclusions, attempts whole-catalog source evidence in resumable batches, builds scoped provisional labels, and discovers category × body-family subgroups in five family folds. Coverage, conflicting/unavailable evidence, subgroup support and source provenance remain inspectable. Small categories do not require a statistical subdivision.
+
+The dashboard supports completed v3 and v4 bundles. v4 adds category exploration and explicit recommendation preferences: OR within a dimension, match fraction across selected dimensions, then the existing listing sort. Strict mode requires all selected dimensions and excludes unknowns. The reference panel defaults to saved v4 category-and-cluster peers, with category/specification and direct comparisons selectable. Buyer usefulness remains unmeasured. No hosted inference or classifier training is added.
+
+All sidebar predicates apply to listing VINs before membership/profile aggregation. Cached scope statistics retain matching-listing counts and filtered price/mileage medians. Category charts, saved subgroup composition, profile tables and reference options follow that scope; the former 200-cohort reference cap is removed. Plot coordinates and assignments remain frozen. Reference changes refresh results automatically, including method-specific ranks/status; reference market summaries/examples follow the filters while alternatives retain broader catalog scope. The independent recommendation draft remains separate.
+
+Validation reproduces preprocessing/peer results and checks immutable dependencies before explicit similarity-only activation. The registry preserves all price settings. Category changes clear stale category selections and affected results. The [README](../README.md#vehicle-categories-and-category-aware-clustering-v4) contains the commands. Future price-feature ablations require matched splits, training-only feature generation and separate predictor activation; current model training and selected dataset are unchanged.
+
 ### Implemented boundary
 
-The local Streamlit app provides the actuals/model dashboard and two inactive panels under **Vehicle Recommendation**. No recommendation backend, hosted AI client, Jev call, candidate ranking, or predictor inference is connected. The research and service designs below remain future work.
+The local Streamlit app provides independent requirements search, reference-variant selection, direct peers and a cluster explorer under **Vehicle Recommendation**. It returns up to five cohorts and ten listings after hard filtering. Observed prices enforce budget. Explicit observed-price/mileage/seating/horsepower sorts determine ordering; broad priorities stay unscored. Compatible price estimates are supporting information only. No hosted AI client or Jev call is connected. Proposed utility/value blending below remains a deferred experiment.
 
 | UI state | Owner and future behavior |
 | --- | --- |
@@ -23,6 +33,43 @@ The local Streamlit app provides the actuals/model dashboard and two inactive pa
 | `similarity_session` | Separate requirements/messages/results plus dashboard reference identity. Filter or snapshot changes clear stale results and advance its revision. |
 
 **Similar vehicles to the filter in the dashboard** is a separate section within the Vehicle Recommendation tab. Its reference comes from active dashboard filters. Those filters will not become automatic hard restrictions on alternatives. The main recommender starts from its own questions and answers.
+
+### Current question-first increment
+
+User choices: guided questions with a review screen; cover everyday buyers and enthusiasts. The user explicitly deferred all OpenAI calls and API-key tests. The supplied credential is stored in root `.env`, ignored by Git. The intended model is `gpt-6-luna`; credential validity and project model access have not been tested.
+
+The grouped questionnaire validates a draft on **Review my requirements**, advances its revision, clears results and offers JSON download. Dashboard filters never supply its answers. Checked limits become hard requirements; unchecked defaults impose none. **Generate recommendations** requires a reviewed budget and matching snapshot. Unresolved priorities remain visible and unscored; unknown hard facts fail their filters. Result tables report qualifying-member cohort summaries and listing-level predictions separately.
+
+| Round | Question | Contract and follow-up |
+| --- | --- | --- |
+| 1. Purpose | What will you use the vehicle for most often? | Commute, family, road trips, work/hauling, enthusiast/weekend, or undecided. Context only; no inferred restriction. |
+| 1. Budget | What maximum advertised USD price should we use? | Clarify before search if missing. Apply inclusive observed price later. Taxes, fees, financing, and ownership costs are excluded. |
+| 2. Basic needs | New, used, or either? Which body styles and minimum seats? | Undecided/empty categories impose no restriction. Unknown required seating fails. Cargo dimensions and towing need separate supported definitions. |
+| 2. Limits | Maximum advertised mileage and decoded years? | Explicit optional limits. Mileage remains in source units pending verification. Contradictory years fail validation. |
+| 2. Categories | Must-have makes, fuel types, or drivetrains? | Observed categories only. AWD and 4WD remain distinct. Empty selections mean no restriction. |
+| 2. History | Require reports of no accidents, damage, salvage, or theft title? | Future filter requires explicit false for each history field; unknowns fail. Seller reports are not verified condition. |
+| 3. Enthusiast/equipment | Transmission, minimum horsepower, or advertised equipment? | Optional for everyone. Exact transmission categories, raw horsepower, and existing quoted `major_options` labels. No inferred acceleration, handling, towing, or installed decoded equipment. |
+| 3. Priorities | Which three priorities matter most? | Price, mileage, space, efficiency, performance, comfort, safety, reliability, or running costs. Ranking weights are not assigned yet. |
+| 4. Clarification | What does an ambiguous priority mean? | Safety: crash protection vs assistance vs reported issues. Efficiency: city vs highway and comparable fuels. Comfort/performance: measurable features. Reliability/cost: explain missing validated targets and ask whether source-linked themes help. |
+| 4. Review | Are the must-haves and priorities correct? | Show the submitted draft, unresolved questions, snapshot identity, revision, and limitations. JSON is a requirements receipt, not a recommendation. |
+
+`car_app/requirements.py` owns validation and the version-1 draft contract. Its export contains `hard_requirements`, `soft_priorities`, unset `priority_weights`, unresolved questions, source mappings, limitations, and the intended provider/model with `api_calls_enabled=false`. These recommendation-only fields do not change the selected model-development dataset or its dictionary.
+
+**Decisions still to review:** wording/order, whether enthusiast questions should be collapsible or a separate step, priority order/weights, and precise follow-ups for safety, comfort, performance, and efficiency. Free-text extraction and conversational history are not implemented.
+
+### Pipeline and correlating outputs
+
+| Stage | Output | State / acceptance |
+| --- | --- | --- |
+| Guided intake and review | Versioned `vehicle_requirements.json` download | Implemented; local validation of categories, limits, ambiguity, revisions, and independent state. |
+| Deterministic search | Eligible listing IDs, complete cohorts, cumulative filter counts | Next; raw observed requirements and lowercase `vin` join cardinality. Never relax silently. |
+| Compatible price adapter | Optional USD estimates and exact run/source receipt | Planned; explicit completed run and compatibility checks. Observed-price results survive missing estimates. |
+| Comparison | Up to five diverse cohorts and ten listings; support and score contributions | Planned; frozen scoring, separate cohort dimensions, qualifying-member distributions. |
+| Luna reasoning | Structured clarifications/explanations with candidate IDs and source references | Deferred by user instruction. No key validation or provider requests until questions are settled and live use is authorized. Bound context/tokens, validate IDs, retain deterministic fallback. |
+| Streamlit results/export | Matching on-screen results and Markdown/JSON receipts | Planned; snapshot/revision checks; no calls on navigation or sidebar reruns. |
+| Similarity | Independent reference/alternative comparison | Planned; narrow dashboard reference, broader alternatives, separate state. |
+
+Offline checks may use fixtures and Streamlit AppTest. They must not instantiate an OpenAI client, read the key for testing, or send provider requests during this phase. No achieved recommendation relevance or explanation quality is claimed.
 
 ### Integration sequence once the engine is ready
 
@@ -119,6 +166,22 @@ Responses carry the session revision and snapshot identity. Allowlist argument f
 
 Default to up to five cohorts and ten individual listings; return fewer when eligibility/evidence is insufficient. Cohort summaries use qualifying members and show count, median, and interquartile range for price/mileage. These are filtered-sample distributions, not prediction intervals or cohort-wide guarantees. Show member-level budget compliance; an affordable median does not make every member affordable.
 
+### Vehicle-profile research boundary
+
+The offline `MODELS/Vehicle_Profiles.ipynb` pilot studies retained-listing specification profiles and conditional year/make/model complaint associations. It replaces the retired safety-equipment experiment. Cohort medians and advertised-option shares do not establish an individual vehicle's installed configuration; complaint associations do not identify trim-specific failures.
+
+Recommendation integration remains outside this pilot. Any later use requires a separate review of source compatibility, profile stability, applicability and held-out usefulness. Apply must-have equipment filters to verified applicable records; Optional cannot establish installation. Research clusters and complaint themes provide no safety ranking, crash-risk prediction, or deployment readiness.
+
+## Implemented similarity, model registry and completion workflow
+
+`car_app/artifact_registry.json` pins the activated full-budget similarity run, selected price metadata/predictor hashes and comparison receipt. v4 defaults to frozen category-and-cluster peers in the reference panel, with direct/category baselines available. Displayed memberships use the reference's fitted context, including unsupported states. Filtered explorers select one fitted fold/view/method and display provisional category labels, subgroup descriptions, matching support and saved observed coordinates. Cluster numbers never align automatically across models.
+
+`car_app.model_registry` inventories all eight feature variants, compares only compatible completed full-budget runs using the existing comparison routine, and records pending/pilot/failed cases. Matched-estimator source additions and expert-coverage controls use saved validation receipts; test scores never select. Source/code/package/feature compatibility is checked before executable predictors load. The base CatBoost full run is the provisional default. SHAP runs on saved bounded inputs in report copies. No training directory is modified.
+
+When training finishes, build a fresh report with `--output <fresh-directory> --explain-rows 100 --publish`; inspect it in Dashboard → Feature comparisons. Activate a candidate explicitly with `--report <directory> --activate <variant/run/estimator>`. Publishing alone preserves the price-model pin. App session model selection is explicit and clears stale results. `MODEL_OUTPUT.ipynb` reads the same pinned comparison.
+
+No additional human labels are required for this exploratory historical prototype. The partial similarity review remains unchanged; it does not establish general buyer suitability. New enrichment, value-score blending, conversational AI and deployment remain future work.
+
 ## Price integration and ranking
 
 Reuse [Price_ML_Models.py](Price_ML_Models.py), especially `prepare_prediction_frame()` and `predict_listings()`. The saved predictor already applies the inverse log transform and returns USD. Do not exponentiate its predictions again.
@@ -160,7 +223,7 @@ YouTube features describe makes, not cohorts/VINs. The selected export lacks a u
 | Price estimator | Compatible existing `base`/`enriched` bundle | Validation-led selection and held-out price/value diagnostics. |
 | Optional semantic decisions | [Jev `jev-1.13.0`](https://docs.typesafe.ai/models) | Narrow judgments added to the same recommendation baseline. |
 
-Candidates are not measured winners. Recheck availability/pricing before experiments and record returned model IDs/configuration. This phase needs no credentials or paid experiments. Future setup keeps secrets outside source control, sends only necessary context, and bounds retries, token use, and spend.
+Candidates are not measured winners. Recheck availability/pricing before experiments and record returned model IDs/configuration. The question-design phase makes no paid requests. A supplied credential is stored in ignored root `.env`; validity and model access remain untested. Future live setup sends only necessary context and bounds retries, token use, and spend.
 
 Jev's [Choice/Score confidence](https://docs.typesafe.ai/confidence) summarizes concentration over supplied outcomes. Noul returns a yes/no probability without separate confidence. Neither establishes suitability or factual evidence. Evaluate three isolated tasks: select a legal next clarification, judge support for a supplied claim, and rerank a small eligible shortlist. Include uncertain/insufficient-evidence outcomes and retain full probabilities.
 
@@ -222,11 +285,12 @@ Hard-filter violations and invented candidate IDs must be zero in the acceptance
 
 ## Staged implementation roadmap
 
-| Stage | Future deliverable | Completion gate |
+| Stage | Deliverable / state | Completion gate |
 | --- | --- | --- |
 | 0. This change | Research/design document and README proposed diagram | Source/local-link, Markdown, and diagram static checks; no runtime/data changes. |
-| 1. Catalog and prediction adapter | Read-only retrieval/evidence and explicit compatible run selection | Join/identity checks, raw/imputed separation, historical labels, scoring fallback. |
-| 2. Deterministic recommender | Preference state, filters, transparent utility, diverse cohort/listing results | Boundary, no-match, revision, and split-safe evaluation checks. |
+| 0a. Question intake | Guided questionnaire, validated review, and JSON export implemented; provider calls disabled | Offline boundary/ambiguity/state checks; user review of questions. |
+| 1. Catalog and prediction adapter | Implemented read-only retrieval and pinned compatible price inference | Join/identity checks, raw/imputed separation, historical labels, estimate fallback. |
+| 2. Deterministic recommender | Implemented requirements, explicit sorts, diverse cohort/listing results, direct peers and cluster views; utility blending deferred | Boundary, no-match, revision, context-consistent clusters and automated acceptance checks. |
 | 3. Conversation layer | Typed tools, clarification, grounded explanation | Locked extraction/claim-support evaluation; zero invalid IDs/constraint violations. |
 | 4. Optional experiments | Jev, text retrieval, intervals, provider comparison | Each addition improves a predefined outcome without constraint regressions; disclose costs/limits. |
 | 5. Capstone demonstration | Reproducible historical demo and reviewed user study | Human relevance/usability evidence, pinned configuration, reproducible outputs, historical scope. |

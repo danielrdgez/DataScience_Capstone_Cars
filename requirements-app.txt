@@ -7,3 +7,8 @@ pyarrow==25.0.1
 numpy==2.5.3
 # Reuses the existing model module's applicability/compatibility helpers.
 scikit-learn==1.9.1
+scipy==1.18.1
+joblib==1.6.0
+catboost==1.2.10
+lightgbm==4.7.0
+xgboost==3.4.1

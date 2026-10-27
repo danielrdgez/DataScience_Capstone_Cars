@@ -16,6 +16,7 @@ from DATA_CLEANING import (
     load_final_data, scan_final_table, USED_CARS_FLOAT_COLUMNS,
     USED_CARS_INTEGER_COLUMNS, USED_CARS_UNITS, TABLES_TO_EXPORT,
     INTEGER_COLUMNS, FLOAT_COLUMNS, PARQUET_FILES,
+    EXCLUDED_LISTING_VINS,
 )
 
 
@@ -163,7 +164,6 @@ class ParquetExportTests(unittest.TestCase):
             self.assertEqual(actual['height'].to_list(), [None, 66.5, None])
             self.assertEqual(actual['listed_date'].dtype, pl.Date)
             vpic = scan_final_table('nhtsa_vpic_decodes', output).collect()
-            # Fixed numeric dtypes are the same in every saved batch.
             self.assertEqual(vpic['Doors'].to_list(), [4, 4])
             self.assertEqual(vpic['BasePrice'].dtype, pl.Float64)
             self.assertEqual(vpic['ABS'].to_list(), [None, 'Standard'])
@@ -200,6 +200,7 @@ class ParquetExportTests(unittest.TestCase):
                 connection.executemany('INSERT INTO used_cars VALUES (?, ?, ?)', [
                     ('keep', '1000000', '1000000'), ('high', '100', '10'),
                     ('low', '100', '10'), ('miles', '100', '10'), ('missing', '100', ''),
+                    *[(vin, '100', '10') for vin in sorted(EXCLUDED_LISTING_VINS)],
                 ])
             connection.close()
             before = database.read_bytes()
@@ -213,7 +214,8 @@ class ParquetExportTests(unittest.TestCase):
             self.assertEqual(actual['vin'].to_list(), ['keep'])
             filtering = report['tables']['used_cars']['row_filtering']
             self.assertEqual(filtering['null_mileage_rows_removed'], 1)
-            self.assertEqual(filtering['rows_removed_for_reviewed_vins'], 3)
+            self.assertEqual(filtering['rows_removed_for_reviewed_vins'], 3 + len(EXCLUDED_LISTING_VINS))
+            self.assertEqual(filtering['manual_excluded_vins'], sorted(EXCLUDED_LISTING_VINS))
             self.assertEqual(database.read_bytes(), before)
 
 

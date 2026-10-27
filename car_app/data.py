@@ -11,9 +11,12 @@ from pathlib import Path
 import polars as pl
 import streamlit as st
 
+from EDA.DATA_CLEANING import EXCLUDED_LISTING_VINS
+
 ROOT = Path(__file__).resolve().parents[1]
 COHORT = ["ModelYear", "Make", "Model", "Trim"]
 FAMILY = COHORT[:3]
+MIN_MAKE_ROWS = 10
 LISTING_COLUMNS = [
     "vin", "listing_id", "price", "mileage", "is_new", "body_type", "fuel_type",
     "wheel_system", "transmission", "maximum_seating", "horsepower",
@@ -97,7 +100,9 @@ class Snapshot:
                     raise ValueError(f"{table}.{name}: snapshot type differs from manifest")
             stat = path.stat()
             signature.append((table, stat.st_size, stat.st_mtime_ns))
-        self.identity = hashlib.sha256(json.dumps(signature).encode()).hexdigest()
+        self.identity = hashlib.sha256(json.dumps(
+            {"tables": signature, "excluded_listing_vins": sorted(EXCLUDED_LISTING_VINS)}
+        ).encode()).hexdigest()
 
     def scan(self, table):
         if table not in TABLE_NAMES:
@@ -105,7 +110,8 @@ class Snapshot:
         return pl.scan_parquet(self.directory / f"{table}.parquet")
 
     def catalog(self, filters=Filters()):
-        listings = self.scan("used_cars").select(LISTING_COLUMNS)
+        listings = self.scan("used_cars").filter(
+            ~pl.col("vin").is_in(sorted(EXCLUDED_LISTING_VINS))).select(LISTING_COLUMNS)
         decoded = self.scan("NHTSA_vPIC").select("vin", *COHORT).with_columns(
             *[pl.when(pl.col(c).cast(pl.String).str.strip_chars() == "").then(None)
               .otherwise(pl.col(c)).alias(c) for c in COHORT[1:]],
@@ -150,6 +156,10 @@ class Snapshot:
             pl.struct(COHORT).filter(pl.col("cohort_complete")).n_unique().alias("cohorts"),
             pl.col("price").median().alias("median_price"),
             pl.col("mileage").median().alias("median_mileage"),
+            *[stat for column in ("price", "mileage") for stat in (
+                pl.col(column).filter(pl.col(column).is_finite()).min().alias(f"min_{column}"),
+                pl.col(column).filter(pl.col(column).is_finite()).max().alias(f"max_{column}"),
+            )],
             pl.col("vpic_matched").fill_null(False).sum().alias("decoded_listings"),
             pl.col("cohort_complete").sum().alias("complete_cohort_listings"),
             pl.col("listed_date").min().alias("first_listing"),
@@ -178,6 +188,23 @@ class Snapshot:
         return pl.read_parquet(path).filter(pl.col("Make").is_in(makes.to_list()))
 
 
+    def youtube_comments(self, filters, limit=10):
+        makes = self.catalog(filters).select("Make").drop_nulls().unique().collect()["Make"].to_list()
+        paths = sorted((self.directory.parents[1] / "YOUTUBE/outputs/text_scored_v1/shards").glob("*.parquet"))
+        if not paths or not makes:
+            return pl.DataFrame()
+        columns = ["Make", "comment_id", "video_title", "published_date", "text"]
+        return (pl.scan_parquet(paths).filter(
+            pl.col("Make").is_in(makes)
+            & (pl.col("attribution_scope") == "explicit_comment")
+            & pl.col("feature_eligible") & ~pl.col("development_excluded")
+            & ~pl.col("direct_price_mention")
+            & (pl.col("published_date") <= "2026-10-01")
+            & (pl.col("updated_date") <= "2026-10-01")
+        ).select(columns).unique(subset=["Make", "comment_id"], maintain_order=True)
+          .head(limit).collect())
+
+
 @st.cache_resource(max_entries=2, show_spinner=False)
 def snapshot_at(signature: tuple):
     return Snapshot()
@@ -195,24 +222,49 @@ def query_snapshot(identity: str, filters: Filters, operation: str, *args):
     source = snapshot()
     if source.identity != identity:
         raise ValueError("Snapshot changed; refresh the app")
+    if operation == "scope":
+        return (source.catalog(filters).group_by(FAMILY).agg(pl.len().alias("listings"))
+                .sort(FAMILY, nulls_last=True).collect())
     if operation == "summary":
         return source.summary(filters)
     if operation == "cohorts":
         return source.cohort_summary(filters, *args)
     if operation == "distribution":
         return source.distribution(filters, *args)
+    if operation == "distribution_extremes":
+        column, = args
+        if column not in ("price", "mileage"):
+            raise ValueError("Unsupported distribution column")
+        return (source.catalog(filters).filter(pl.col(column).is_finite())
+                .select(*COHORT, "price", "mileage", "vin", "listing_id")
+                .sort([column, "vin"], descending=[True, False])
+                .head(10).collect())
     if operation == "listings":
         column, descending, page = args
         if column not in ["price", "mileage", "ModelYear", "listing_id"]:
             raise ValueError("Unsupported sort column")
-        return source.catalog(filters).sort([column, "listing_id"], descending=[descending, False],
-                                             nulls_last=True).slice(page * 100, 100).collect()
+        listing_page = source.catalog(filters).sort(
+            [column, "listing_id"], descending=[descending, False], nulls_last=True
+        ).slice(page * 100, 100)
+        decoded = source.scan("NHTSA_vPIC")
+        transmission = "Transmission" if "Transmission" in decoded.collect_schema() else "TransmissionStyle"
+        return listing_page.join(
+            decoded.select("vin", pl.col(transmission).alias("Transmission")),
+            on="vin", how="left", validate="1:1",
+        ).collect()
     if operation == "scatter":
         return source.catalog(filters).select("vin", *COHORT, "price", "mileage").sort(
             pl.col("vin").hash(seed=42)).head(3000).collect()
+    if operation == "youtube_comments":
+        return source.youtube_comments(filters)
     if operation == "youtube":
         return source.youtube(filters)
     raise ValueError("Unsupported query")
+
+
+def supported_make_cohorts(rows):
+    supported = rows.group_by("Make").len().filter(pl.col("len") >= MIN_MAKE_ROWS).select("Make")
+    return rows.join(supported, on="Make", how="semi")
 
 
 @st.cache_data(max_entries=4, ttl=900, show_spinner=False)
@@ -220,9 +272,10 @@ def filter_options(identity):
     source = snapshot()
     decoded = source.scan("NHTSA_vPIC").select("vin", *COHORT)
     cohorts = source.scan("used_cars").select("vin").join(decoded, on="vin", how="inner", validate="1:1")
-    cohorts = cohorts.select(COHORT).unique().collect()
+    cohorts = cohorts.collect()
+    cohorts = supported_make_cohorts(cohorts).select(COHORT).unique()
     categories = source.scan("used_cars").select(
-        *[pl.col(c).drop_nulls().unique().implode() for c in ["body_type", "fuel_type", "wheel_system"]]
+        *[pl.col(c).drop_nulls().unique().implode() for c in ["body_type", "fuel_type", "wheel_system", "transmission"]]
     ).collect().to_dicts()[0]
     return cohorts, categories
 

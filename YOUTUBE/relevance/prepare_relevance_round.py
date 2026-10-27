@@ -114,7 +114,6 @@ def prepare(source: Path, vpic: Path, existing: Path, predictions: Path,
         raise FileExistsError(f"Choose a new --output-dir; {output} already exists")
     if min(blind_n, train_n) < 1 or not 0 < reserve_fraction < 1:
         raise ValueError("Positive sample counts and 0 < --reserve-fraction < 1 required")
-    # Probe required inputs before creating any output.
     pq.ParquetFile(source)
     source_stat = (source.stat().st_size, source.stat().st_mtime_ns)
     makes = sorted({str(row["Make"]).strip() for row in iter_rows(vpic, ("Make",))
@@ -187,7 +186,6 @@ def prepare(source: Path, vpic: Path, existing: Path, predictions: Path,
     if len(blind) != blind_n:
         raise ValueError(f"Only {len(blind)} blind candidates; reduce --blind-size or reserve more videos")
     blind_hashes = {row["normalized_text_sha256"] for row in blind}
-    # Free the source-sized sets before the second streaming scan.
     del seen_ids, hashes
     pools = {name: [] for name in ("creator_spam_candidate", "short_nonfiller", "general_nonfiller")}
     for row in iter_rows(source):

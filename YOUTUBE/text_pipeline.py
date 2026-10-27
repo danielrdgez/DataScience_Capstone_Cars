@@ -78,7 +78,6 @@ def main():
     else:
         from YOUTUBE.text.features import aggregate
         result = aggregate(**args)
-    # Avoid dumping split inventories/checkpoint hashes into the terminal.
     print(json.dumps({k:v for k,v in result.items() if k not in
                      {'config','shards','artifacts','canonical_makes','development_videos','development_text_hashes','code_sha256'}}, indent=2))
 

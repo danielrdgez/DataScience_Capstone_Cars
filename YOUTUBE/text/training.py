@@ -138,7 +138,6 @@ def fit_student(task, rows, output, specification, device, batch_size, epochs, a
             if (index+1)%accumulation==0 or index+1==batches_per_epoch:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
-                # Linear warmup and decay; scheduler derived from persisted step count.
                 warmup = max(1, int(.1*scheduled_steps))
                 factor = min((step+1)/warmup, max(.05, (scheduled_steps-step)/max(1,scheduled_steps-warmup)))
                 for group in optimizer.param_groups:

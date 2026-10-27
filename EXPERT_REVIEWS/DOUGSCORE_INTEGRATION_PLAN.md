@@ -1,12 +1,12 @@
 # DougScore expert baseline integration
 
-**Current route (October 6, 2026):** new labeling is deferred.
-Use [the GPU text runbook](../YOUTUBE/docs/GPU_TEXT_RUNBOOK.md) for completed
-raw-source community features and the separate expert comparison commands.
-DougScore identity approval and verified availability dates remain pending;
-expert scores are excluded from the current price comparisons. The original
-supervised comparison design below remains for later use.
+**Implemented route (October 9, 2026):** `price_features.py` now generates separate price-model expert features with automatic **year/make/model** matching, per-family category means, and an equal-model make fallback requiring five distinct models. Trim is ignored for DougScore linkage by user instruction; separate vPIC cohort columns remain intact. The `full` variant includes these features alongside existing YouTube inputs. See [README](../README.md#dougscore-expert-features) and the [selected predictor definitions](../DATA_DICTIONARY.md#selected-dougscore-predictors).
 
+The first family artifact (`outputs/price_features_v2/`) has 302 families and 22 supported makes from 308 resolved reviews; 277 reviews remain unmatched. Automatic matches are not manually verified. Historical score dates remain unverified, Value-derived predictors are excluded, and no comment labels or blended scores are introduced.
+
+## Earlier supervised comparison design
+
+The design below records the earlier trim-specific/manual-review proposal. The implemented year/make/model price-feature route above supersedes its matching and price-integration deferrals. Video-linked, independently validated expert/community sentiment comparisons remain future work.
 
 Started 2026-10-01 after user approval. This is an expert extension alongside the current
 [YouTube sentiment plan](../YOUTUBE/docs/MAKE_SENTIMENT_PIPELINE_PLAN.md). The source
@@ -172,7 +172,7 @@ expert/community analysis or recommendations for the supplied snapshot.
 ## Planned tables and execution order
 
 Field meanings and candidate keys are recorded in the
-[data dictionary](../DATA_DICTIONARY.md#dougscore-expert-opinion-baseline).
+[data dictionary](../DATA_DICTIONARY.md#selected-dougscore-predictors).
 
 | Planned artifact | Grain | Role |
 | --- | --- | --- |
