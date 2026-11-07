@@ -25,8 +25,10 @@ elif view == "Sources":
     source_inspection(source)
 elif view == "Vehicle categories":
     from car_app.recommendation import active_similarity, category_explorer
+    from car_app.discovery import category_dashboard
     try:
-        catalog = active_similarity(source)
-        category_explorer(catalog, "dashboard_categories", profiles=catalog.filtered_profiles(source, filters))
+        if not category_dashboard(source, filters):
+            catalog = active_similarity(source)
+            category_explorer(catalog, "dashboard_categories", profiles=catalog.filtered_profiles(source, filters))
     except (OSError, ValueError, KeyError) as exc:
         st.warning(f"Saved category artifacts unavailable: {exc}")

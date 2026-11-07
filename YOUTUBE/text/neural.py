@@ -13,9 +13,10 @@ import polars as pl
 
 from YOUTUBE.sentiment.common import atomic_json, file_hash, load_json, new_dir, utc_now
 from .data import (
-    ALIASES, CONTENT, MODEL_IDS, SENTIMENT_ASPECTS, TOPICS, canonical_matcher, choose_label,
+    ALIASES, CONTENT, MODEL_IDS, TOPICS, canonical_matcher, choose_label,
     evidence_rows, implementation_hashes, runtime, verified_manifest,
 )
+from .sentiment import annotate, calibration_temperature, decide
 
 
 def device_info(device='cuda'):
@@ -115,7 +116,8 @@ def checkpoint_state(output, name, config, resume):
 
 
 def score(input_dir, output_dir, backend='teacher', model_dir=None, device='cuda',
-          batch_size=32, shard_size=256, cache_dir=None, resume=False, mask_makes=True):
+          batch_size=32, shard_size=256, cache_dir=None, resume=False, mask_makes=True,
+          sentiment_policy=None, threshold=.75, margin=.15, calibration=None):
     from sentence_transformers import SentenceTransformer
     import torch
     input_dir, output_dir = Path(input_dir), Path(output_dir)
@@ -147,11 +149,20 @@ def score(input_dir, output_dir, backend='teacher', model_dir=None, device='cuda
             raise ValueError('Student training used later text than the requested source cutoff')
         if mask_makes != trained['mask_makes']:
             raise ValueError('Make masking must match student/reducer training')
+    sentiment_policy = sentiment_policy or ('argmax' if trained else 'threshold')
+    if backend == 'teacher' and (sentiment_policy != 'threshold' or calibration):
+        raise ValueError('Teacher pseudo-labels retain confident threshold selection')
+    temperature = calibration_temperature(calibration, file_hash(Path(model_dir)/'train_manifest.json') if trained else None)
+    decide({}, sentiment_policy, threshold, margin, temperature)
     config = dict(input_sha256=file_hash(input_dir/'prepare_manifest.json'), backend=backend,
                   train_sha256=file_hash(Path(model_dir)/'train_manifest.json') if trained else None,
                   models=frozen, hardware=hardware, batch_size=batch_size, shard_size=shard_size,
                   mask_makes=mask_makes, max_tokens=256, topic_threshold=.30,
-                  content_threshold=.75, content_margin=.15, tone_threshold=.75, tone_margin=.15,
+                  content_threshold=.75, content_margin=.15, tone_threshold=threshold, tone_margin=margin,
+                  sentiment_schema_version=2, sentiment_policy=sentiment_policy,
+                  sentiment_temperature=temperature,
+                  calibration_sha256=file_hash(calibration) if calibration else None,
+                  calibration_label_source=load_json(calibration).get('label_source') if calibration else None,
                   cache_dir=str(cache_dir.resolve()), dependencies=runtime(), code_sha256=implementation_hashes(),
                   hypotheses=CONTENT, topics=TOPICS)
     state = checkpoint_state(output_dir, 'score_manifest.json', config, resume)
@@ -230,9 +241,7 @@ def score(input_dir, output_dir, backend='teacher', model_dir=None, device='cuda
                         row = rows[index]
                         row['tone_scores_json'] = json.dumps(values)
                         row['model_truncated'] |= bool(flag)
-                        # A single tone cannot identify separate polarities of several aspects.
-                        if len(row['topics'])==1 and row['topics'][0] in SENTIMENT_ASPECTS and not flag:
-                            row['polarity'] = choose_label(values)
+            rows = [annotate(row, sentiment_policy, threshold, margin, temperature) for row in rows]
             temporary = output_dir/(shard+'.tmp')
             # Explicit list types allow all-abstention shards to concatenate safely.
             frame = pl.from_dicts(rows, infer_schema_length=None).with_columns(

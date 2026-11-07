@@ -1,8 +1,6 @@
 """Native Streamlit views for actuals, frozen evaluations, and source inspection."""
 from __future__ import annotations
 
-from dataclasses import asdict, replace
-import json
 import math
 import re
 
@@ -13,10 +11,10 @@ import pandas as pd
 import polars as pl
 import streamlit as st
 
-from car_app.data import COHORT, FAMILY, ROOT, Filters, cached_evidence, filter_options, query_snapshot
+from car_app.data import COHORT, ROOT, Filters, cached_evidence, filter_options, query_snapshot
 from car_app.artifacts import (
-    diagnostic_inventory, errors, evaluation, evaluation_with_fallback,
-    paired_comparison, saved_shap, stat_key,
+    diagnostic_inventory, errors, evaluation_with_fallback,
+    paired_comparison, saved_shap, stat_key, youtube_price_contract,
 )
 from car_app.state import update_dashboard_scope
 
@@ -75,13 +73,85 @@ def evidence_display(data, view):
     return data
 
 
-def youtube_display(data):
-    renamed = data.rename({c: c.removeprefix("yt_") for c in data.columns if c.startswith("yt_")})
-    identity = [c for c in ["Make", "support_suppressed"] if c in renamed.columns]
-    fields = [c for c in renamed.columns if c not in identity]
-    return (renamed.with_columns(pl.col(c).cast(pl.String).alias(c) for c in fields)
-            .unpivot(index=identity, on=fields, variable_name="Metric", value_name="Value")
-            .sort("Make", maintain_order=True))
+def youtube_feature_definition(field):
+    name = field.removeprefix("yt_")
+    counts = {"comment_count": "Deduplicated attributable comments.",
+              "eligible_count": "Comments with eligible vehicle content.",
+              "video_count": "Videos with eligible vehicle content.",
+              "feature_row_present": "Whether a matching make feature row exists."}
+    if name in counts:
+        return "Evidence support", counts[name]
+    if name.startswith("semantic_") and name != "semantic_missing":
+        return "Semantic coordinates", "Training-fitted PCA coordinate of make-masked text embeddings; no fixed range or standalone topic meaning."
+    if name.endswith("_mention_share"):
+        topic = name.removesuffix("_mention_share").replace("_", " ")
+        return "Discussion topics", f"Video-balanced share of eligible comments mentioning {topic} (0–1); topics can overlap."
+    if name.endswith("missing") or name == "support_suppressed":
+        scope = name.removesuffix("_missing").replace("_", " ")
+        meaning = ("Insufficient semantic/topic evidence: fewer than 20 eligible comments or five videos."
+                   if name in {"semantic_missing", "support_suppressed"} or name.endswith("_topic_missing")
+                   else f"Insufficient {scope} sentiment evidence: fewer than 20 resolved opinions or five opinion videos.")
+        return "Evidence support", meaning + " Yes means insufficient support."
+    measurements = {
+        "log1p_opinion_video_count": "Natural log of one plus contributing opinion-video count.",
+        "log1p_opinion_count": "Natural log of one plus resolved-opinion comment count.",
+        "opinion_video_count": "Contributing videos with resolved opinions; retained below score support.",
+        "opinion_count": "Resolved-opinion comments; retained below score support.",
+        "video_balanced_soft_net": "Video-balanced positive minus negative tone probabilities (−1 to 1).",
+        "video_balanced_net": "Video-balanced (positive − negative) / all resolved opinions, including neutral and mixed (−1 to 1).",
+        "mean_confidence": "Mean winning tone probability (0–1); not validated correctness.",
+        "mean_margin": "Mean lead of the winning tone probability over the runner-up (0–1).",
+        "mean_entropy": "Mean three-class tone entropy, divided by ln(3) (0–1); higher means less concentrated probabilities.",
+        "low_confidence_share": "Video-balanced share of opinions with a clause below 0.75 confidence or 0.15 margin (0–1).",
+    }
+    for suffix, meaning in measurements.items():
+        if name.endswith("_" + suffix):
+            scope = name.removesuffix("_" + suffix).replace("_", " ")
+            group = ("Overall sentiment" if scope == "overall" else
+                     "Evidence support" if "count" in suffix else "Aspect sentiment and uncertainty")
+            return group, f"{scope.capitalize()}: {meaning}"
+    raise ValueError("No YouTube feature definition: " + field)
+
+
+def youtube_display(data, columns=None):
+    from MODELS.Price_ML_Models import YOUTUBE_LOG_COUNT_COLUMNS
+
+    sources = {target: source for source, target in YOUTUBE_LOG_COUNT_COLUMNS.items()}
+    columns = [c for c in data.columns if c != "Make"] if columns is None else columns
+    definitions = {field: youtube_feature_definition(field) for field in columns}
+    rows = []
+    for record in data.iter_rows(named=True):
+        for field in columns:
+            value = record[field]
+            group, meaning = definitions[field]
+            missing = value is None or (isinstance(value, float) and not math.isfinite(value))
+            flag = field.endswith("_missing") or field == "yt_support_suppressed"
+            evidence = ("Unavailable / insufficient evidence" if missing else
+                        "Insufficient support" if flag and value else "Support met" if flag else
+                        "Observed support" if "count" in field or field == "yt_feature_row_present" else "Supported")
+            displayed = (None if missing else "Yes" if isinstance(value, bool) and value else
+                         "No" if isinstance(value, bool) else str(value))
+            rows.append({"Group": group, "Feature": field, "Meaning": meaning, "Make": record["Make"],
+                         "Value": displayed, "Transformation": "ln(1 + count)" if field in sources else "As exported",
+                         "Original count": str(record[sources[field]]) if field in sources and record[sources[field]] is not None else None,
+                         "Evidence": evidence})
+    return pl.DataFrame(rows, schema={c: pl.String for c in (
+        "Group", "Feature", "Meaning", "Make", "Value", "Transformation", "Original count", "Evidence")}).sort("Group", "Feature", "Make")
+
+
+def youtube_feature_tables(data, columns):
+    from MODELS.Price_ML_Models import YOUTUBE_LOG_COUNT_COLUMNS
+    from NHTSA.text_features import join_youtube_features
+
+    if len(columns) != len(set(columns)):
+        raise ValueError("Duplicate YouTube inputs in the pricing receipt")
+    model_values = join_youtube_features(data.select("Make"), data)
+    if not set(columns).issubset(model_values.columns):
+        raise ValueError("YouTube export does not supply all recorded pricing inputs")
+    # Raw counts already accompany their transformed inputs in the main table.
+    represented = {*columns, *[source for source, target in YOUTUBE_LOG_COUNT_COLUMNS.items() if target in columns]}
+    additional = [c for c in data.columns if c != "Make" and c not in represented]
+    return youtube_display(model_values, columns), youtube_display(data, additional)
 
 
 def safety_long_display(records):
@@ -416,13 +486,26 @@ def nhtsa(source, filters):
     download(records, "Download displayed evidence", f"{view.lower()}_evidence.csv", "nhtsa_csv")
     if view == "Safety":
         safety_media(media_items)
+    st.divider()
+    st.subheader("Evidence patterns and comparisons")
+    from car_app.discovery import nhtsa_dashboard
+    try:
+        nhtsa_dashboard(source, filters, view=view)
+    except (OSError, ValueError, KeyError) as exc:
+        st.warning(f"Saved discovery charts unavailable: {exc}")
 
 
 def youtube(source, filters):
-    st.caption("Make-level experimental descriptors · Explicit-comment attribution · Cumulative cutoff: October 1, 2026")
+    try:
+        contract = youtube_price_contract()
+    except (OSError, ValueError, KeyError) as exc:
+        st.warning(f"YouTube pricing inputs unavailable: {exc}")
+        return
+    feature_args = (contract["directory"], contract["source_signature"])
+    st.caption(f"Make-level experimental descriptors · Explicit-comment attribution · Cumulative cutoff: {contract['as_of']}")
     with st.spinner("Reading supported make features…"):
-        data = query_snapshot(source.identity, filters, "youtube")
-    available = query_snapshot(source.identity, Filters(), "youtube")
+        data = query_snapshot(source.identity, filters, "youtube", *feature_args)
+    available = query_snapshot(source.identity, Filters(), "youtube", *feature_args)
     eligible_cohorts, _ = filter_options(source.identity)
     available = available.filter(pl.col("Make").is_in(eligible_cohorts["Make"].drop_nulls().unique().to_list())) if "Make" in available.columns else available
     base_makes = data["Make"].to_list() if "Make" in data.columns else []
@@ -435,37 +518,63 @@ def youtube(source, filters):
     st.caption("Comparison applies only to YouTube. The added make uses make-level evidence, independent of sidebar model/year and listing attributes.")
     comparison_filters = Filters(makes=(comparison,)) if comparison else None
     if comparison_filters:
-        extra = query_snapshot(source.identity, comparison_filters, "youtube")
+        extra = query_snapshot(source.identity, comparison_filters, "youtube", *feature_args)
         data = pl.concat([data, extra]).unique(subset="Make", maintain_order=True).sort("Make")
     if data.is_empty():
         st.info("No selected make has a saved feature row. This does not establish absence of discussion.")
+        return
+    try:
+        inputs, additional = youtube_feature_tables(data, contract["columns"])
+    except ValueError as exc:
+        st.warning(f"YouTube pricing inputs unavailable: {exc}")
         return
     supported = data.filter(~pl.col("yt_support_suppressed"))
     with st.container(horizontal=True):
         st.metric("Matched makes", str(data.height), border=True)
         st.metric("Makes with topic support", str(supported.height), border=True)
         st.metric("Recorded comments across matched makes", f"{data['yt_comment_count'].sum():,}", border=True)
-    st.info("These observations describe makes, not selected years, models, or trims. Independent automotive accuracy is unmeasured; directional sentiment is unavailable.")
-    fields = [c for c in data.columns if c.endswith("_mention_share")]
-    if fields:
-        topics = data.select("Make", *fields).unpivot(index="Make", variable_name="topic", value_name="share")
-        topics = topics.with_columns(pl.col("topic").str.replace("^yt_", "").str.replace("_mention_share$", "").str.replace_all("_", " "),
-                                     (pl.col("share") * 100).alias("share_pct")).drop_nulls("share")
+    st.info("These observations describe makes, not selected years, models, or trims. Sentiment scores are experimental; independent automotive accuracy is unmeasured.")
+    st.subheader("YouTube inputs used by the Full pricing models")
+    st.caption(f"{len(contract['columns'])} recorded inputs per make. Base and Enhanced do not use YouTube. "
+               "Values are shown before model imputation, scaling or PCR; missing values remain missing.")
+    groups = ["All feature groups", *inputs["Group"].unique(maintain_order=True).to_list()]
+    if st.session_state.get("youtube_feature_group") not in [None, *groups]:
+        st.session_state["youtube_feature_group"] = groups[0]
+    group = st.selectbox("Feature group", groups, key="youtube_feature_group")
+    displayed = inputs if group == groups[0] else inputs.filter(pl.col("Group") == group)
+    table(displayed, "Recorded Full pricing inputs, definitions, values and evidence support", 550)
+    download(displayed, "Download displayed pricing inputs", "youtube_pricing_inputs.csv", "youtube_csv")
+    st.caption("Each feature appears once per make. Original counts accompany the two log-transformed inputs. "
+               "Semantic coordinates are learned text dimensions, not individual topic or sentiment scores.")
+    with st.expander("Model source"):
+        st.caption("Recorded Full runs: " + "; ".join(contract["runs"]))
+        st.caption("The source export and input list are checked against the selected pricing receipt, including matching continuation runs. "
+                   "A recorded input does not imply every estimator has finished training or establish a causal price effect.")
+    with st.expander("Discussion topic chart"):
+        topics = inputs.filter(pl.col("Group") == "Discussion topics").with_columns(
+            pl.col("Feature").str.replace("^yt_", "").str.replace("_mention_share$", "").str.replace_all("_", " ").alias("topic"),
+            (pl.col("Value").cast(pl.Float64, strict=False) * 100).alias("share_pct"),
+        ).drop_nulls("share_pct")
         if not topics.is_empty():
             chart = alt.Chart(topics.to_pandas()).mark_bar().encode(
                 y=alt.Y("topic:N", title=None), x=alt.X("share_pct:Q", title="Video-balanced mention share (%)"),
                 color="Make:N", yOffset="Make:N", tooltip=["Make", "topic", "share_pct"],
             ).properties(height=370)
             st.altair_chart(chart, alt="Supported make-level discussion topic shares")
-    columns = ["Make", "yt_comment_count", "yt_eligible_count", "yt_video_count", "yt_support_suppressed", *fields]
-    displayed = youtube_display(data.select(columns))
-    table(displayed, "Make-level discussion support and topic shares", 400)
-    st.caption("Topic support requires at least 20 eligible comments and five videos. Unsupported measurements stay null; themes can overlap.")
-    download(youtube_display(data), "Download matched make features", "youtube_make_features.csv", "youtube_csv")
+        else:
+            st.info("No supported topic shares are available for these makes.")
+        st.caption("This is the chart view of the same recorded topic inputs. Topic evidence needs 20 eligible comments and five videos; shares can overlap.")
+    if not additional.is_empty():
+        with st.expander("Additional YouTube evidence"):
+            st.caption("These exported measurements are excluded from the selected Full model inputs. "
+                       "Features and original counts already shown above are omitted here.")
+            table(additional.drop("Original count"), "Additional YouTube evidence excluded from the Full pricing inputs", 400)
+            download(additional.drop("Original count"), "Download additional evidence", "youtube_additional_evidence.csv", "youtube_additional_csv")
     st.subheader("Example comments for selected makes")
-    comments = query_snapshot(source.identity, filters, "youtube_comments")
+    comment_args = (contract["directory"], contract["as_of"], contract["source_signature"])
+    comments = query_snapshot(source.identity, filters, "youtube_comments", *comment_args)
     if comparison_filters:
-        extra_comments = query_snapshot(source.identity, comparison_filters, "youtube_comments")
+        extra_comments = query_snapshot(source.identity, comparison_filters, "youtube_comments", *comment_args)
         comments = pl.concat([comments.head(5), extra_comments.head(5)], how="diagonal_relaxed")
     st.caption("Up to 10 saved comments with explicit make attribution and eligible scored text. "
                "Examples describe makes, not selected years, models, or trims; they are not a representative sample.")
@@ -503,24 +612,51 @@ def model_table(data, label, height=None):
     table(data, label, height, column_config=columns)
 
 
+@st.fragment(run_every="30s")
+def watch_price_checkpoints():
+    """Refresh the page only when estimator availability or run status changes."""
+    try:
+        _, _, statuses, _ = diagnostic_inventory()
+        identity = statuses.to_json(orient="records")
+    except (ValueError, OSError):
+        return
+    previous = st.session_state.get("price_checkpoint_identity")
+    st.session_state["price_checkpoint_identity"] = identity
+    if previous is not None and previous != identity:
+        st.rerun()
+    st.caption("Checks for completed checkpoints every 30 seconds while this tab is open.")
+
+
 def models(source, filters):
     st.header("Model performance and feature comparisons")
     st.caption("Saved evaluations only · No training, live scoring, or AI calls")
+    watch_price_checkpoints()
     if st.button("Refresh saved evaluations", icon=":material/refresh:"):
-        st.session_state["artifact_refresh"] += 1
+        st.session_state["artifact_refresh"] = st.session_state.get("artifact_refresh", 0) + 1
     try:
         available, candidates, model_status, inspected = diagnostic_inventory()
     except (ValueError, OSError) as exc:
         st.warning(f"Checkpoint discovery unavailable: {exc}")
         return
+    if not model_status.empty:
+        completed = model_status.status.eq("completed").sum() if "status" in model_status else len(candidates)
+        st.caption(f"{completed} of {len(model_status)} selected estimators have completed evaluation checkpoints.")
+        with st.expander("Selected runs and estimator status"):
+            model_table(model_status, "Selected training runs, completed estimators and pending checkpoints", 360)
+            if not inspected.empty:
+                model_table(inspected, "Unavailable checkpoints and their reasons")
     if not available:
         st.info("No completed model evaluations are available.")
         return
     selected = list(available)
     st.caption("Runs may use different data or training protocols; displayed metrics do not establish a matched experiment.")
-    st.caption("Newest completed full-data checkpoint per feature-set/model combination. Discovery refreshes on every interaction.")
+    st.caption("Only completed estimators from the configured runs appear below. Pending estimators become available as training saves their predictor and both evaluation receipts.")
     mode = st.segmented_control("Evaluation", ["Test", "Validation"], default="Test", key="evaluation_mode")
-    st.caption("Validation predictions evaluate settings selected during development; test predictions evaluate the final refit on untouched families. The same vehicle filters apply separately to each partition.")
+    strategies = {run.metadata.get("split_strategy") for run in available.values()}
+    if strategies == {"cohort_stratified"}:
+        st.caption("VINs are disjoint across fit, validation and test within decoded year/make/model groups with at least 25 eligible VINs. The same groups appear in all partitions. Validation evaluates the fit-only model; test evaluates the final refit on fit plus validation.")
+    else:
+        st.caption("Validation evaluates development fits; test evaluates final refits on separate VINs. Family separation depends on each run's recorded split strategy.")
     aggregate = []
     focused = []
     for name in selected:
@@ -531,6 +667,8 @@ def models(source, filters):
             metrics = metrics[metrics.model.isin(allowed_models)]
         if metrics.empty and mode == "Validation":
             test_report = run.table("metrics.csv")
+            if "model" in test_report:
+                test_report = test_report[test_report.model.isin(allowed_models)]
             if "validation_mae" in test_report:
                 metrics = test_report[["model", "validation_mae"]].rename(columns={"validation_mae": "mae"})
                 st.caption(f"{run.metadata['model_type']}: recorded selection-validation MAE only; other validation errors are unavailable.")
@@ -539,6 +677,8 @@ def models(source, filters):
             continue
         overall = metrics.copy()
         overall.insert(0, "feature_set", run.metadata["model_type"])
+        overall["run"] = run.name
+        overall["split_strategy"] = run.metadata.get("split_strategy")
         overall["scope"] = "overall saved " + mode.lower()
         aggregate.append(overall)
         if run.legacy:
@@ -563,14 +703,14 @@ def models(source, filters):
     st.subheader("Overall saved performance")
     leading = [c for c in ["feature_set", "model", "price_weighting", "scope", "mae", "rmse", "r2",
                            "wape_pct", "mean_signed_error", "p95_absolute_error", "test_rows",
-                           "validation_mae", "validation_rmse", "validation_r2"] if c in overall]
+                           "validation_mae", "validation_rmse", "validation_r2", "run", "split_strategy"] if c in overall]
     model_table(overall[leading], "Overall saved model performance", 360)
     download(overall, "Download overall metrics", "overall_metrics.csv", "overall_metrics_csv")
     st.caption("Model selection uses recorded validation MAE, not the best exposed test result. Bootstrap MAE intervals describe aggregate error uncertainty, not individual price intervals.")
     if focused:
         filtered = pd.concat(focused, ignore_index=True)
         st.subheader("Performance for dashboard filters")
-        st.warning("Year/make/model families are held out together. Narrow filters can match few or no evaluation rows. With fewer than 100 rows, this section broadens to make/model, then make. Each row identifies its actual scope; sidebar filters stay unchanged. Broader scopes drop other vehicle filters.")
+        st.warning("Narrow filters can match few or no evaluation rows. With fewer than 100 rows, this section broadens to make/model, then make. Each row identifies its actual scope; sidebar filters stay unchanged. Broader scopes drop other vehicle filters.")
         model_table(filtered, "Errors recomputed from matching saved evaluation predictions", 360)
         download(filtered, "Download filtered metrics", "filtered_metrics.csv", "filtered_metrics_csv")
         if "mae" in filtered:
@@ -578,10 +718,10 @@ def models(source, filters):
             if not plotted.empty:
                 chart = alt.Chart(plotted).mark_bar().encode(
                     x=alt.X("mae:Q", title=f"Filtered {mode.lower()} MAE (USD)"),
-                    y=alt.Y("model:N", title="Model", sort=["catboost", "lightgbm", "xgboost", "random_forest", "multiple_linear_regression", "lasso", "ridge", "elastic_net", "pcr"]),
-                    yOffset=alt.YOffset("feature_set:N", sort=["base", "enhanced", "enhanced_safety", "full"]),
-                    color=alt.Color("feature_set:N", title="Feature set", sort=["base", "enhanced", "enhanced_safety", "full"],
-                                    scale=alt.Scale(domain=["base", "enhanced", "enhanced_safety", "full"], range=["#315E88", "#A77925", "#9A4C24", "#74618C"])), tooltip=["feature_set", "model", "scope", "rows", "mae", "support"])
+                    y=alt.Y("model:N", title="Model", sort=candidates.model.drop_duplicates().tolist()),
+                    yOffset=alt.YOffset("feature_set:N", sort=candidates.feature_set.drop_duplicates().tolist()),
+                    color=alt.Color("feature_set:N", title="Feature set", sort=candidates.feature_set.drop_duplicates().tolist()),
+                    tooltip=["feature_set", "model", "scope", "rows", "mae", "support"])
                 st.altair_chart(chart, alt="Filtered held-out MAE by feature set and estimator")
 
         st.caption("Low support means fewer than 100 evaluation rows or five vehicle families. Empty selections and undefined R² stay unavailable.")

@@ -20,6 +20,61 @@ from NHTSA import text_features as text
 
 
 class PriceEvaluationTests(unittest.TestCase):
+    def test_all_variants_use_log_mileage_only(self):
+        excluded = {'mileage', 'engine_displacement', 'maximum_seating_numeric',
+                    'listing_color', 'fuel_type', 'body_type',
+                    'highway_fuel_economy', 'WheelSizeRear', 'EngineCylinders',
+                    'SeatRows', 'Axles', 'BrakeSystemType', 'CoolingType', 'ESC',
+                    'injury_report_count', 'doug_review_count', 'doug_cool_factor',
+                    'doug_cohort_match_available', 'doug_make_baseline_available',
+                    *price.EXCLUDED_YOUTUBE_FEATURE_COLUMNS}
+        for variant, columns in price.MODEL_FEATURE_SETS.items():
+            with self.subTest(variant=variant):
+                self.assertIn('log1p_mileage', columns)
+                self.assertNotIn('mileage', columns)
+                self.assertFalse(excluded & set(columns))
+                self.assertEqual(len(columns), len(set(columns)))
+                if variant != 'base':
+                    self.assertTrue({'EngineKW', 'DisplacementL', 'Seats', 'FuelTypePrimary',
+                                     'BodyClass'}.issubset(columns))
+
+    def test_sentiment_variant_uses_versioned_features_and_rejects_prediction_drift(self):
+        from unittest.mock import MagicMock
+        columns = price.YOUTUBE_SENTIMENT_FEATURE_COLUMNS
+        self.assertEqual(len(columns), 40)
+        self.assertEqual(len(price.YOUTUBE_EXPORT_FEATURE_COLUMNS), 75)
+        for variant in price.YOUTUBE_MODEL_TYPES:
+            self.assertTrue(set(columns).issubset(price.MODEL_FEATURE_SETS[variant]))
+            self.assertTrue({'yt_overall_video_balanced_net', 'yt_overall_mean_entropy',
+                             *price.YOUTUBE_LOG_COUNT_COLUMNS.values()}.issubset(price.MODEL_FEATURE_SETS[variant]))
+            self.assertFalse(set(price.YOUTUBE_LOG_COUNT_COLUMNS) & set(price.MODEL_FEATURE_SETS[variant]))
+        self.assertEqual(set(price.MODEL_FEATURE_SETS['full_youtube_sentiment']) - set(price.ENRICHED_FEATURE_COLUMNS), set(columns))
+        features = pl.DataFrame({'Make': ['TOYOTA'], **{c: [False if c.endswith('_missing') or c == 'yt_support_suppressed' else 1.] for c in price.YOUTUBE_EXPORT_FEATURE_COLUMNS}})
+        listings = pl.DataFrame({'vin': ['a', 'b'], 'Make': ['Toyota', 'UNKNOWN']})
+        joined = text.join_youtube_features(listings, features)
+        self.assertEqual(joined.height, 2)
+        self.assertTrue(joined['yt_overall_missing'][1])
+        self.assertIsNone(joined['yt_overall_video_balanced_soft_net'][1])
+        for derived in price.YOUTUBE_LOG_COUNT_COLUMNS.values():
+            self.assertAlmostEqual(joined[derived][0], np.log1p(1.))
+            self.assertIsNone(joined[derived][1])
+        predictor = MagicMock()
+        predictor.raw_feature_columns_ = price.MODEL_FEATURE_SETS['full_youtube_sentiment']
+        predictor.youtube_feature_info_ = dict(directory='frozen-youtube', manifest_sha256='expected')
+        with patch('joblib.load', return_value=predictor), \
+             patch.object(text, 'load_youtube_features', return_value=(features, {'manifest_sha256': 'changed'})):
+            with self.assertRaisesRegex(ValueError, 'YouTube snapshot differs'):
+                price.predict_listings('full_youtube_sentiment', Path('model.joblib'), listings)
+
+    def test_youtube_v1_exports_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            text.write_json(path / 'price_feature_manifest.json', {
+                'state': 'complete', 'attribution_scope': 'explicit_comment',
+                'window': 'cumulative', 'sentiment_schema_version': 1})
+            with self.assertRaisesRegex(ValueError, 'v1 is retired'):
+                text.load_youtube_features(path)
+
     def test_full_suite_forwards_gpu_sampling_and_unlimited_tree_options(self):
         from unittest.mock import MagicMock
 
@@ -79,6 +134,56 @@ class PriceEvaluationTests(unittest.TestCase):
             self.assertEqual(result["ridge"]["device"], "cpu")
             with self.assertRaisesRegex(RuntimeError, "unsupported build"):
                 price.resolve_training_devices(["lightgbm"], "gpu")
+
+    def test_lightgbm_cpu_fit_and_selection_recovery_guards(self):
+        model = price._make_tree_model("lightgbm", 3, parameters={"num_leaves": 7})
+        x = pd.DataFrame({"value": np.arange(100, dtype=float),
+                          "category": pd.Categorical(["a", "b"] * 50)})
+        model.fit(x, np.log1p(np.arange(100)), categorical_feature=["category"])
+        self.assertTrue(np.isfinite(model.predict(x)).all())
+        self.assertEqual(model.get_params()["n_jobs"], 1)
+        self.assertTrue(model.get_params()["force_col_wise"])
+        self.assertEqual(model.get_params()["histogram_pool_size"], 512)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "lightgbm").mkdir()
+            metadata = {key: "matching" for key in (
+                "model_type", "dataset_fingerprint", "source_file_sha256", "split_fingerprint",
+                "tuning_fingerprint", "preprocessing_version", "raw_feature_columns",
+                "package_versions", "price_weighting", "split_strategy", "tuning_rows", "max_trees")}
+            metadata["training_devices"] = {"lightgbm": {"device": "cpu"}}
+            (source / "run_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+            (source / "lightgbm/selection.json").write_text(json.dumps({
+                "iterations": 13697, "validation_mae": 1823.97,
+                "parameters": {"num_leaves": 255, "learning_rate": 0.05, "min_child_samples": 100}}), encoding="utf-8")
+            selection = price._load_lightgbm_selection(source, metadata)
+            self.assertEqual(selection["iterations"], 13697)
+            metadata["split_fingerprint"] = "different"
+            with self.assertRaisesRegex(ValueError, "split_fingerprint"):
+                price._load_lightgbm_selection(source, metadata)
+
+    def test_lightgbm_shards_preserve_predictions_and_contributions_after_reload(self):
+        x = pd.DataFrame({"value": np.arange(600, dtype=float),
+                          "category": pd.Categorical(["a", "b", "c"] * 200)})
+        y = np.log1p(np.arange(600))
+        params = {"num_leaves": 7, "min_child_samples": 5}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            native = price._fit_lightgbm_full(x, y, ["category"], 203, params, None, path / "progress.json")
+            reference = price._make_tree_model("lightgbm", 203, parameters=params)
+            reference.fit(x, y, categorical_feature=["category"])
+            np.testing.assert_allclose(native.predict(x), reference.predict(x), rtol=1e-12, atol=1e-12)
+            bundle = price.ExpLogPricePredictor(native)
+            joblib.dump(bundle, path / "predictor.joblib")
+            loaded = joblib.load(path / "predictor.joblib")
+            self.assertEqual(len(loaded.estimator.shards_), 3)
+            np.testing.assert_allclose(bundle.predict(x), loaded.predict(x), rtol=1e-12, atol=1e-12)
+            contributions = loaded.estimator.predict(x.iloc[:4], pred_contrib=True)
+            np.testing.assert_allclose(contributions.sum(axis=1), native.predict(x.iloc[:4]), rtol=1e-12, atol=1e-12)
+            state = native.__getstate__()
+            with self.assertRaisesRegex(ValueError, "offsets"):
+                price._validate_lightgbm_shard(state["texts"][0].replace("Tree=1\n", "Tree=999\n"))
+            self.assertEqual(json.loads((path / "progress.json").read_text())["completed_iterations"], 203)
 
     def test_boosting_unlimited_budget_expands_until_patience_completes(self):
         from unittest.mock import MagicMock
@@ -415,6 +520,7 @@ class PriceEvaluationTests(unittest.TestCase):
         listings = pl.DataFrame({"vin": ["a", "b", "c", "d"], "Make": ["Toyota", " TOYOTA ", "HONDA", None],
                                  "ModelYear": [2020] * 4, "Model": ["X"] * 4, "Trim": ["BASE"] * 4})
         features = pl.DataFrame({"Make": ["TOYOTA"], "yt_feature_row_present": [1], "yt_comment_count": [100],
+                                "yt_overall_opinion_count": [100], "yt_overall_opinion_video_count": [0],
                                 "yt_support_suppressed": [False], "yt_semantic_missing": [False], "yt_semantic_01": [.2]})
         joined = text.join_youtube_features(listings, features)
         self.assertEqual(joined.height, listings.height)
@@ -423,6 +529,8 @@ class PriceEvaluationTests(unittest.TestCase):
         self.assertEqual(joined["yt_feature_row_present"].to_list(), [1, 1, 0, 0])
         self.assertEqual(joined["yt_support_suppressed"].to_list(), [False, False, True, True])
         self.assertEqual(joined["yt_comment_count"].to_list(), [100, 100, None, None])
+        np.testing.assert_allclose(joined['yt_overall_log1p_opinion_count'][:2], np.log1p([100., 100.]))
+        self.assertEqual(joined['yt_overall_log1p_opinion_video_count'].to_list(), [0., 0., None, None])
         with self.assertRaises(pl.exceptions.ComputeError):
             text.join_youtube_features(listings, pl.concat([features, features]))
 
@@ -521,12 +629,14 @@ class PriceEvaluationTests(unittest.TestCase):
                 selected_youtube.mkdir()
                 youtube_frame = pl.DataFrame({"Make": ["TOYOTA", "FERRARI"], "yt_feature_row_present": [1, 1],
                     "yt_support_suppressed": [False, False], "yt_semantic_01": [.3, .7],
-                    "yt_reliability_video_balanced_net": [None, 0.]} )
+                    "yt_reliability_video_balanced_net": [None, 0.],
+                    "yt_overall_opinion_count": [100, 200], "yt_overall_opinion_video_count": [10, 20]} )
                 youtube_frame.write_parquet(selected_youtube / "make_features.parquet")
-                youtube_manifest = {"state": "complete", "attribution_scope": "explicit_comment", "window": "cumulative",
+                youtube_manifest = {"state": "complete", "sentiment_schema_version": 2, "attribution_scope": "explicit_comment", "window": "cumulative",
                     "as_of": "2026-10-01", "features_sha256": price.file_sha256(selected_youtube / "make_features.parquet"),
                     "feature_blocks": {"coverage": ["yt_feature_row_present", "yt_support_suppressed"],
-                                       "topics": ["yt_semantic_01"], "sentiment": ["yt_reliability_video_balanced_net"]},
+                                       "topics": ["yt_semantic_01"], "sentiment": ["yt_reliability_video_balanced_net",
+                                       "yt_overall_opinion_count", "yt_overall_opinion_video_count"]},
                     "directional_sentiment_available": False, "sentiment_limitation": "Synthetic constant sentiment"}
                 text.write_json(selected_youtube / "price_feature_manifest.json", youtube_manifest)
                 vectors = features.select(text.KEYS).with_columns(pl.lit(.5).alias("tfidf_complaint_00"))
@@ -564,6 +674,10 @@ class PriceEvaluationTests(unittest.TestCase):
                     assembled = text.join_youtube_features(text.join_family_features(frame, vectors), youtube_frame).to_pandas()
                     for variant in youtube_args.feature_sets:
                         predictor = joblib.load(youtube_output / f"{variant}_ridge_none_predictor.joblib")
+                        self.assertFalse(set(predictor.feature_names_in_) & price.EXCLUDED_YOUTUBE_FEATURE_COLUMNS)
+                        self.assertFalse(set(predictor.feature_names_in_) & set(price.YOUTUBE_LOG_COUNT_COLUMNS))
+                        if variant == 'nhtsa_text_youtube':
+                            self.assertTrue(set(price.YOUTUBE_LOG_COUNT_COLUMNS.values()).issubset(predictor.feature_names_in_))
                         saved = pd.read_parquet(youtube_output / f"{variant}_ridge_none_test_predictions.parquet")
                         np.testing.assert_allclose(predictor.predict(assembled[assembled.partition == "test"]), saved.prediction)
 
@@ -650,7 +764,9 @@ class PriceEvaluationTests(unittest.TestCase):
                 # Postprocessing must work after the original sources disappear.
                 with patch.object(price, "load_model_frame", side_effect=AssertionError("No refitting")):
                     results = price.explain_saved_run(run, rows=4)
-                    self.assertEqual({k: v["status"] for k, v in results.items()}, {k: "completed" for k in price.PILOT_MODEL_NAMES})
+                    self.assertEqual({k: v["status"] for k, v in results.items()},
+                                     {k: "completed" for k in price.PILOT_MODEL_NAMES},
+                                     msg=json.dumps(results, indent=2, default=str))
                     comparison = price.compare_saved_runs([run])
                     self.assertEqual(len(pd.read_csv(comparison / "validation_ranking.csv")), 8)
                 # A later estimator failure must preserve the completed predecessor.
@@ -714,12 +830,15 @@ class DougPriceIntegrationTests(unittest.TestCase):
         row = {'review_record_id':'a','ModelYear':2020,'make_raw':'Toyota','model_raw':'A',
             **{c:6 for c in (*expert.WEEKEND,*expert.DAILY)}, 'weekend_total':30,'daily_total':30,'dougscore':60}
         cohorts,makes = expert.feature_tables(expert.resolve_reviews([row],vpic.to_dicts()))
-        selected = ('mileage','year','make_name','model_name','is_new','yt_feature_row_present',*expert.FEATURE_COLUMNS)
-        youtube = pl.DataFrame({'Make':['TOYOTA'],'yt_feature_row_present':[1]})
+        selected = ('log1p_mileage','year','make_name','model_name','is_new','yt_comment_count',
+                    *price.YOUTUBE_LOG_COUNT_COLUMNS.values(), *price.EXPERT_FEATURE_COLUMNS)
+        youtube = pl.DataFrame({'Make':['TOYOTA'],'yt_feature_row_present':[1],'yt_comment_count':[100],
+                               'yt_overall_opinion_count':[100], 'yt_overall_opinion_video_count':[5]})
         def scan(name):
             return (listings if name=='used_cars' else vpic).lazy()
         with patch.dict(price.MODEL_FEATURE_SETS,{'full':selected}), \
-             patch.object(price,'YOUTUBE_FEATURE_COLUMNS',('yt_feature_row_present',)), \
+             patch.object(price,'YOUTUBE_FEATURE_COLUMNS',('yt_comment_count',)), \
+             patch.object(price,'YOUTUBE_EXPORT_FEATURE_COLUMNS',('yt_feature_row_present','yt_comment_count',*price.YOUTUBE_LOG_COUNT_COLUMNS)), \
              patch.object(price,'scan_final_table',side_effect=scan), \
              patch.object(price,'_load_cohort_exclusion_vins',return_value=set()), \
              patch.object(price,'file_sha256',return_value='fixed'), \
@@ -729,6 +848,9 @@ class DougPriceIntegrationTests(unittest.TestCase):
             training,info = price.load_model_frame('full',None)
             inference = price.prepare_prediction_frame('full',listings.drop('price'))
             assert_frame_equal(training.select('vin',*selected),inference.select('vin',*selected))
+            np.testing.assert_allclose(training['log1p_mileage'], np.log1p([100., 200., 300.]))
+            self.assertEqual(training['mileage'].to_list(), [100., 200., 300.])
+            self.assertNotIn('mileage', info['feature_columns'])
             self.assertEqual(training['doug_source_level'].to_list(),['cohort','cohort','missing'])
             self.assertEqual(training['Trim'].to_list(),['Sport','Base',None])
 
@@ -745,8 +867,69 @@ class DougPriceIntegrationTests(unittest.TestCase):
             prepare.assert_not_called()
         predictor.raw_feature_columns_ = list(price.MODEL_FEATURE_SETS['full_youtube'])
         with patch.object(joblib,'load',return_value=predictor):
-            with self.assertRaisesRegex(ValueError,'full_youtube'):
+            with self.assertRaisesRegex(ValueError,'retrain the requested variant'):
                 price.predict_listings('full',Path('predictor.joblib'),pl.DataFrame({'vin':['a']}))
+
+
+class DiscoveryTextTests(unittest.TestCase):
+    def test_cached_encoder_accepts_transformer_files_and_stale_cache_reference(self):
+        from NHTSA.discovery_text import cached_encoder, ENCODER_CACHE_NAME
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "hub" / ENCODER_CACHE_NAME
+            snapshot = repository / "snapshots/complete-revision"
+            snapshot.mkdir(parents=True)
+            (snapshot / "config.json").write_text('{"model_type": "bert", "hidden_size": 384}')
+            (snapshot / "tokenizer.json").write_text('{}')
+            (snapshot / "model.safetensors").write_bytes(b"fixture weights; not loaded")
+            (repository / "refs").mkdir()
+            (repository / "refs/main").write_text("missing-revision")
+            with patch.dict("os.environ", {"HF_HOME": str(root)}, clear=True), \
+                 patch("NHTSA.discovery_text.Path.home", return_value=root / "unused-home"):
+                self.assertEqual(cached_encoder(), snapshot.resolve())
+            self.assertEqual(cached_encoder(snapshot), snapshot.resolve())
+            self.assertFalse((snapshot / "modules.json").exists())
+
+    def test_cached_encoder_rejects_missing_weights(self):
+        from NHTSA.discovery_text import cached_encoder
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config.json").write_text('{}')
+            (root / "tokenizer.json").write_text('{}')
+            with self.assertRaisesRegex(ValueError, "model weights"):
+                cached_encoder(root)
+
+    def test_global_conflicting_campaign_and_product_applicability(self):
+        from datetime import date
+        from MODELS.discovery_artifacts import normalize_families
+        from NHTSA.discovery_text import collect_records
+        families = normalize_families(pd.DataFrame({"ModelYear": [2015, 2016], "Make": ["TEST", "TEST"], "Model": ["A", "B"]}))
+        complaints = pl.DataFrame({"model_year": [2015, 2015], "make": ["TEST", "TEST"], "model": ["A", "A"],
+            "odiNumber": [1, 1], "dateComplaintFiled": [date(2019, 1, 1), date(2021, 1, 1)], "products": ["[]", "[]"],
+            "summary": ["Owner reported engine stalling repeatedly.", "Owner reported engine stalling repeatedly."], "components": ["ENGINE", "ENGINE"]})
+        recalls = pl.DataFrame({"model_year": [2015, 2016, 2015], "make": ["TEST"] * 3, "model": ["A", "B", "A"],
+            "ModelYear": [2015, 2016, 2015], "Make": ["TEST"] * 3, "Model": ["A", "B", "WRONG"],
+            "NHTSACampaignNumber": ["X", "X", "Y"], "ReportReceivedDate": [date(2019, 1, 1)] * 3,
+            "Summary": ["Different narrative one.", "Different narrative two.", "Unsupported queried vehicle."],
+            "Consequence": ["Potential loss of braking."] * 3, "Remedy": ["Replace the defective part."] * 3, "Component": ["BRAKES"] * 3})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            complaints.write_parquet(path / "NHTSA_Complaints.parquet")
+            recalls.write_parquet(path / "NHTSA_Recalls.parquet")
+            with patch.object(price, "_complaint_product_matches", return_value=True):
+                records, audit = collect_records(path, families, date(2020, 12, 31))
+            self.assertEqual(records.source.tolist(), ["complaint"])
+            self.assertEqual(records.source_id.tolist(), ["1"])
+            self.assertEqual(audit["recall"]["conflicting_ids"], 1)
+
+    def test_absent_source_is_not_zero_risk_or_zero_complaints(self):
+        from NHTSA.discovery_text import family_components
+        records = pd.DataFrame({"family_id": ["2015|TEST|A"], "source": ["recall"], "record_id": ["recall:X"],
+                                "summary": ["The brake component may fail unexpectedly."], "components": ["BRAKES"]})
+        result = family_components(records, pd.DataFrame())
+        self.assertEqual(result.source.tolist(), ["recall"])
+        self.assertEqual(result.brakes_count.tolist(), [1])
+        self.assertFalse(bool(result.collection_complete.iloc[0]))
 
 
 if __name__ == "__main__":

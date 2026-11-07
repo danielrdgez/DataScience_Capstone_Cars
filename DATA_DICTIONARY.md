@@ -331,6 +331,8 @@ One imported comment. **1,981,686 rows; 12 columns**.
 
 ## Data rules
 
+Derived exports below leave the six source schemas unchanged. Saved artifacts retain their recorded policy/schema; changed predictor selections require compatible retraining. Workflow commands belong in the [README](README.md).
+
 - Snapshot: `DATA/CAR_DATA_FINAL/`; schemas and row counts follow `manifest.json`.
 - Missing profiles include nulls, blank text, and non-finite numbers. Color placeholders (`none`, `null`, `unknown`, `n/a`, `na`, `not applicable`) and seating `--` are missing. Examples exclude missing values.
 - Safety profiles treat star-rating `0`/`Not Rated` as missing; zero rollover values are missing when the paired rating is unavailable. Saved values remain unchanged by profiling.
@@ -342,7 +344,7 @@ One imported comment. **1,981,686 rows; 12 columns**.
 
 ## Selected vehicle-profile research data
 
-Derived artifacts from `MODELS/vehicle_profiles.py`, under timestamped `MODEL_OUTPUT/vehicle_profiles/` runs. The six source tables remain unchanged. Population: listings retained after the existing price/mileage export exclusions. No additional price-model loader filters apply. Source profiles above remain the last measured snapshot profiles; new research counts appear only after successful preparation.
+Derived artifacts from `MODELS/vehicle_profiles.py`, under timestamped `MODEL_OUTPUT/vehicle_profiles/` runs. Population: listings retained after the existing price/mileage export exclusions. No additional price-model loader filters apply.
 
 | Artifact / fields | Definition |
 |---|---|
@@ -362,7 +364,7 @@ Derived artifacts from `MODELS/vehicle_profiles.py`, under timestamped `MODEL_OU
 | Family outcomes and comparison | Distinct complaint component shares (flags unioned per family/ID before averaging); topic weights join once by narrative hash, with one contribution per family/ID; screened exploratory topic-weight averages, >=20 supported complaints per family. Equal-family Ridge comparisons: body/year/powertrain, plus cluster mixtures, plus continuous specifications. Development grouped-CV selects alpha; paired held-out MAE changes use 1,000 Make/Model bootstrap draws for seeds 42/43 when >=20 blocks exist. Families with >=90% concentration have a descriptive sensitivity output. |
 | Provenance / blockers | Stage manifests freeze configuration, source/schema/code/artifact hashes, versions and runtime. Blocked sources, insufficient specifications, no accepted partition, failed automated checks and insufficient overlap have explicit statuses. Smoke/synthetic runs cannot establish research findings. |
 
-**Research profile verification (2026-10-22):** Run `20261022T194605792017Z` reuses verified equivalent preparation, vehicle, and text artifacts from `20261022T190319954539Z` with original code hashes and equivalence checks in `reuse_receipt.json`. The selected snapshot contains: 2,792,999 listings, 14,258 complete cohorts, 11,043 cohorts with >=5 VINs, and 10,345 assigned cohorts (cluster 0: 7,186; cluster 1: 3,159); 3,913 cohorts remain unassigned. Numeric representative evidence is unavailable for 548 cohorts. The accepted two-cluster K-means fit has median stability ARI 0.948 and silhouette 0.351. Complete-case sensitivity ARI is 0.649 on 539 common cohorts. Complaint topics and comparisons are recorded in their stage manifests; automated screening does not establish semantic validity. The previous airbag-only experiment is retired. Family associations remain ecological; installed equipment, complaint trim, exposure, failure rates, safety rankings, causal effects and recommendation readiness are unidentified.
+Baseline receipts: `MODEL_OUTPUT/vehicle_profiles/20261022T194605792017Z/`, with verified preparation reuse from `20261022T190319954539Z`. Numerical acceptance does not establish topic semantics or buyer usefulness; inspect [Vehicle_Profiles.ipynb](MODELS/Vehicle_Profiles.ipynb) and the stage manifests for results.
 
 ### Expanded segmentation experiments
 
@@ -383,21 +385,7 @@ The original research definitions and verification above describe the preserved 
 | Relationship experiments | Baseline body/year/powertrain, plus clusters, plus continuous inputs, plus both. Market continuous comparators include market coordinates. Identical family eligibility within each comparison; primary >=80% assignment coverage, >0% sensitivity, >=20 incidents. Grouped development validation refits upstream vehicle field selection/encoding/partition before Ridge alpha selection. Structured component outcomes are primary; legacy text comparisons remain separately exploratory. |
 | Receipts and interpretation | `experiment_id`, `assignment_status`, support fields and preparation hash accompany membership. Nested manifests hash artifacts and both code modules. Mapping receipts expose unmapped/overlapping components; field audits include scale disagreement and untested comparisons. Previously inspected held-out data remain exploratory; block intervals are not multiplicity-adjusted. No recommendation-readiness, reliability, failure-rate or causal claim follows. |
 
-**Expanded verification (2026-10-22):** Run `20261022T220141-segmentation-final` reuses the fresh full-source preparation from `20261022T214736653574Z-segmentation`. Every copied artifact hash matches; preparation code is unchanged. `reuse_receipt.json` preserves execution lineage. Population: 2,792,999 listings, 14,258 complete cohorts, and 11,043 cohorts with >=5 VINs. All 14,258 legacy assignment rows match the prior baseline, including unassigned rows.
-
-The expanded specification experiment assigns 10,538 cohorts (cluster 0: 4,458; cluster 1: 6,080); 3,720 remain unassigned. Both support policies select two K-means groups (median ARI 0.929; silhouette 0.272); no Gower candidate passes. Width and both legroom fields pass selection; drivetrain coverage is 69.83%, below the 70% threshold after per-field support checks. Fixed-field complete-case ARI is 0.890 on 635 common anchor cohorts; equal-family fitting ARI is 0.910. Legacy-versus-expanded ARI is 0.523 on 10,233 common assigned cohorts. These comparisons change different policies and populations and do not isolate a causal improvement from added fields. Market fitting is blocked by absent source mileage-unit metadata.
-
-Complaint evidence covers 5,031 observed families; 1,799 have no eligible primary incidents. The eight-category taxonomy leaves 73,864 of 332,876 distinct eligible incidents unmapped (22.2%); 35,026 incidents match multiple categories. Omitted labels include suspension, tires, vehicle speed control, and fuel/propulsion system. No component-only partition passes the frozen criteria at any support threshold. Accepted component-plus-topic sensitivities remain semantically unvalidated:
-
-| Minimum eligible incidents and usable narratives | Assigned families | Selected clusters | Median stability ARI | Families below 80% modal assignment support | Disjoint-half agreement |
-|---|---:|---:|---:|---:|---:|
-| 20 | 2,110 | 2 | 0.933 | 343 | 89.0% of 1,460 families |
-| 50 | 1,448 | 2 | 0.916 | 173 | 88.5% of 1,448 families |
-| 100 | 904 | 3 | 0.772 | 95 | 89.7% of 904 families |
-
-These are conditional reporting-composition profiles. They are not validated mechanical categories, exposure-adjusted risks, or recommendation features ready for adoption. Named mechanical interpretations still require review. Supplemental `topic_associations/` artifacts link the 20-incident topic sensitivity to vehicle family mixtures; their block intervals condition on frozen assignments.
-
-The four-arm primary Ridge comparison has 46 held-out Make/Model blocks. All eight 95% block-bootstrap intervals for adding clusters to continuous summaries include zero; incremental predictive value is inconclusive. Intervals are exploratory and unadjusted across outcomes. Broad/small support policies select byte-identical partitions and identical consumed cohort data, so the small-policy evaluation reuses the fresh broad-policy outputs with an explicit input/artifact equivalence receipt. This does not add an independent replication.
+Expanded receipts: `MODEL_OUTPUT/vehicle_profiles/20261022T220141-segmentation-final/` and preparation `20261022T214736653574Z-segmentation`. The saved market experiment is blocked by unverified mileage units; topic sensitivities and Ridge results remain exploratory.
 
 ## Selected interpretable vehicle-taxonomy data
 
@@ -421,23 +409,7 @@ Derived from the verified vehicle-profile cohort preparation and the same retain
 | Evaluation | Development pilot is separate from frozen held-out Make/Model audit queries. Up to 200 automatic semantic assignments are sampled by label/body family; all supercar/hypercar assignments also listed. Human verdicts are initially null. Per-label >=90% reviewed precision needs >=20 reviewed positives; smaller samples remain provisional. Make/Model bootstrap intervals require >=20 represented blocks; repeated trims are not independent observations. |
 | Peer usefulness | Paired, fully reviewed five-peer slates versus body/year baseline on identical held-out queries. Make/Model bootstrap intervals require >=20 blocks. Unreviewed diagnostics describe specification distances only. No usefulness, semantic accuracy, reliability or recommendation-readiness claim follows from clustering stability. |
 
-**Initial source-backed profile (2026-10-23):** 2,792,999 retained listings reconcile with the original preparation; 14,258 complete cohorts remain. The evidence seed gives 1,221 cohorts at least one positioning/performance label (8.6%); it does not establish comprehensive semantic coverage. There are 15,183 long-form label rows, including overlapping labels.
-
-| Dimension | Assigned cohorts | Unresolved cohorts |
-|---|---:|---:|
-| Body style | 12,689 | 1,569 |
-| Source-specific size | 426 | 13,832 |
-| Market positioning | 886 | 13,372 |
-| Performance character | 373 | 13,885 |
-| Powertrain | 793 | 13,465 |
-
-Positioning includes 882 luxury and four economy cohorts. Performance includes 335 sports-car cohorts, 16 also labeled supercar, plus 38 grand tourers. Body/size compatibility screening queues 102 source-size claims instead of propagating them to incompatible or unverified bodies. Sparse physical support does not remove a separately supported positioning/performance label.
-
-Supplemental fields have five-VIN support and homogeneous summaries for 9,886 door-count cohorts, 369 curb-weight cohorts and 9,483 explicitly parsed torque cohorts. Raw curb-weight presence is 3.14% of retained listings; source-wide dictionary coverage is not used as joined cohort support. Missing electrification evidence leaves conventional-looking vehicles unresolved rather than assuming combustion-only powertrains.
-
-Global K-means retains two groups (10,538 assigned cohorts; median ARI 0.929; silhouette 0.272). The sourced luxury passenger-car view supports three groups (388 assigned cohorts; 332 development cohorts across 11 Make/Model blocks; median ARI 0.907; silhouette 0.402). Gower yields no accepted subdivision. Other category views fail the predeclared 50-cohort/10-block gate. The corrected label stage reuses verified equivalent fits with explicit receipts; composition summaries are regenerated, not treated as another replication.
-
-The frozen acceptance sample contains only 95 eligible held-out automatic assignments, all luxury, across two Make/Model blocks. The requested 200-assignment sample and evaluation of other semantic labels are unsupported by this initial evidence seed. Verdicts and independent peer usefulness remain pending; no precision acceptance or interval is claimed. All 16 supercar cohorts are separately queued for review.
+Historical taxonomy coverage, supplemental support, and acceptance samples are inspected in [Vehicle_Profiles.ipynb](MODELS/Vehicle_Profiles.ipynb). Sparse source coverage and incomplete human review do not establish category accuracy.
 
 ### Variant taxonomy v2
 
@@ -481,11 +453,7 @@ V3 consumes the frozen v2 preparation without changing the six source schemas, c
 | Human evaluation | Ratings 0 unsuitable, 1 plausible, 2 strong. `useful_at_5` counts grades >=1 divided by five; `strong_at_5` counts grade 2 divided by five. Unavailable positions score zero; empty queries remain. Preference records A/B/tie/neither. Identical alternatives within a query require identical grades. Strict import requires complete judgments. Explicit `--allow-incomplete` leaves blank judgments unknown: a missing returned-vehicle grade excludes both slates from usefulness/strong-match summaries; missing preferences are excluded separately. `fully_graded_pairs`, `preference_cards`, `complete_cards`, `excluded_usefulness_cards`, and `missing_judgments` expose denominators. Scored rows retain all queries with `fully_graded_pair`/`preference_recorded` and unavailable outcomes blank; coverage retains every frozen query. Paired family bootstrap uses 2,000 draws each for seeds 42/43. Adoption requires positive lower 95% bounds in both seeds, 100 complete full-budget reviews, no coverage loss and zero compatibility violations; incomplete reviews cannot adopt clusters. |
 | Provenance and limitations | Frozen preparation/artifact hashes, consumed helper-code hashes, taxonomy/source receipts, package versions, configuration and family membership accompany outputs. Historical inventory, unknown powertrains, sparse electric specifications and one-reviewer judgment limit interpretation. Semantic accuracy and general buyer suitability remain unmeasured. |
 
-**V3 verification:** Full-budget run `20261024-full` reconciles 2,792,999 VINs and 21,285 profiles; 10,918 profiles represent 2,151,863 specification-eligible VINs. All 42,570 profile/approach status rows are retained; 13 eligible profiles have no compatible alternative family. Global two-group K-means passes in all five folds. Body-family retrieval has accepted subdivisions for SUVs in five folds and passenger cars in three; pickup and van/minivan views have none. The 100 query blocks include 11 sourced family mappings and 89 decoded-name fallbacks. Both approaches return five peers for all benchmark queries; only seven queries change their candidate set.
-
-**Human review:** `20261024-human-evaluation` preserves the supplied 100-card export. At the reviewer's request, missing grades exclude C012/C035 from paired scores and the missing C004 preference is skipped separately: 98 graded pairs, 99 preferences, 97 entirely complete cards. Direct/cluster useful@5 is 487/490 (99.39%) versus 488/490 (99.59%); strong@5 is 345/490 (70.41%) versus 347/490 (70.82%). The useful@5 gain is 0.20 percentage points, with both seeded 95% intervals spanning 0–0.61 points. Preferences: four cluster, zero direct, 95 ties. No coverage loss or compatibility violation was found. Status is `partially_reviewed`; direct retrieval remains selected. These results concern one reviewer and the graded catalog subset; omitted judgments, unresolved aliases and sparse electric evidence limit generalization.
-
-The local app reads the frozen v3 profiles and memberships without changing these model-data definitions. Cluster comparisons use one reference-fitted context; direct similarity remains selected. Recommendation-only hard filters, example-listing predictions and session state are documented in the recommendation plan and README. Source schemas and selected training predictors remain unchanged.
+V3 result receipts are `20261024-full` and `20261024-human-evaluation` under `MODEL_OUTPUT/vehicle_similarity_v3/`. The incomplete one-reviewer comparison did not pass cluster adoption; direct specification retrieval remains selected. Current app workflows belong in the [README](README.md#vehicle-discovery-and-recommendation).
 
 ## Derived price-model fields
 
@@ -493,8 +461,8 @@ These fields are assembled in memory; the six source schemas remain unchanged.
 
 | Field | Definition |
 | --- | --- |
-| `maximum_seating_numeric` | Number extracted before `seat`/`seats`; other text becomes missing. |
-| `log1p_mileage` | `ln(1 + mileage)` for nonnegative mileage; otherwise missing. |
+| `maximum_seating_numeric` | Number extracted before `seat`/`seats`; other text becomes missing. Retained as a derived helper, excluded from price predictors; enriched variants use decoded `Seats`. |
+| `log1p_mileage` | `ln(1 + mileage)` for nonnegative mileage; otherwise missing. Sole mileage predictor in every variant. Raw `mileage` remains a derivation, eligibility and audit field. Existing fitted models require retraining to adopt this selection. |
 | `option_navigation`, `option_leather`, `option_heated_seats`, `option_backup_camera`, `option_bluetooth`, `option_sunroof`, `option_remote_start`, `option_alloy_wheels`, `option_adaptive_cruise` | Exact quoted labels in `major_options`: Navigation System, Leather Seats, Heated Seats, Backup Camera, Bluetooth, Sunroof/Moonroof, Remote Start, Alloy Wheels, Adaptive Cruise Control. Valid empty lists yield 0; missing/invalid lists yield null. |
 | `<numeric_feature>__missing` | Missingness before training-median imputation. Entirely missing training columns fill with 0. |
 | `cohort_complete` | All four decoded cohort fields populated; audit only. |
@@ -505,9 +473,9 @@ These fields are assembled in memory; the six source schemas remain unchanged.
 - Target: `ln(price)`; predictions and errors use USD. Both new and used listings are included.
 - Missing categories and unseen categories use separate tokens. Numerical imputation and category vocabularies fit training data only.
 - Default price training uses decoded `ModelYear`, `Make`, `Model` strata with >=25 unique eligible VINs after filtering and optional sampling. Trim is pooled only for splitting; the four-column vehicle cohort definition remains unchanged. Case and repeated whitespace are normalized for split identity. Incomplete decoded year/make/model identities and smaller strata are excluded. Validation and test each receive `floor(n/5)` VINs; fitting receives the remainder, guaranteeing at least 15/5/5. Eligibility uses no fitted target statistics.
-- `cohort_split_audit.csv` records normalized year/make/model keys, eligible VIN counts, retained/exclusion status, and fit/validation/test counts. The retained-VIN manifest and run metadata bind the partition and eligibility policy. No source tables or dataset profiles are rewritten.
+- `cohort_split_audit.csv` records normalized year/make/model keys, eligible VIN counts, retained/exclusion status, and fit/validation/test counts. The retained-VIN manifest and run metadata bind the partition and eligibility policy.
 - Tuning uses target-independent VIN samples within every retained year/make/model stratum: up to 20 fitting and five validation VINs reserved per stratum, then proportional allocation by remaining capacity. Requested targets expand when minimum coverage needs more rows. `tuning_manifest.parquet`, `tuning_fingerprint`, and `tuning_sampling` record the selected VINs and policy. Rare strata are intentionally overrepresented relative to pure uniform sampling; selection metrics use the sampled listings without inverse-probability weighting.
-- With `--full-validation`, selected settings refit on all fitting VINs with fit-only preprocessing before scoring all validation VINs. Final predictors refit on fit plus validation and score all test VINs. `validation_evaluation_rows` records receipt scope; `tuning_validation_mae` retains the selection-sample score. Training backend, requested device, and tree stopping policy are metadata, not predictor fields. Source schemas and profiles remain unchanged.
+- With `--full-validation`, selected settings refit on all fitting VINs with fit-only preprocessing before scoring all validation VINs. Final predictors refit on fit plus validation and score all test VINs. `validation_evaluation_rows` records receipt scope; `tuning_validation_mae` retains the selection-sample score. Training backend, requested device, and tree stopping policy are metadata, not predictor fields.
 - Legacy split strategies alone allow listing identity fallback and an explicit unresolved block. Decoded predictor fields remain unchanged.
 
 ### Price-model variants and saved explanation data
@@ -517,24 +485,61 @@ These fields are assembled in memory; the six source schemas remain unchanged.
 | `base` | Listing fields and deterministic listing-derived fields. |
 | `enhanced` | Base plus selected general, truck, and battery/electrification vPIC fields. |
 | `enhanced_safety` | Enhanced plus complaint/recall counts, source-presence flags, and safety aggregates below. |
-| `full_youtube` | Enhanced safety plus the 46 selected YouTube predictors below; previous full definition. |
-| `enhanced_safety_expert` | Enhanced safety plus the 14 selected DougScore predictors below. |
-| `enhanced_safety_expert_coverage` | Enhanced safety plus five DougScore coverage/source fields only. |
-| `full_youtube_expert_coverage` | Full YouTube plus five DougScore coverage/source fields only. |
-| `full` | Enhanced safety plus the 46 YouTube and 14 DougScore predictors. |
+| `full_youtube`, `full_youtube_sentiment` | Enhanced safety plus the selected 40 sentiment-v2 YouTube predictors; both names use the same YouTube schema. |
+| `enhanced_safety_expert` | Enhanced safety plus the 10 selected DougScore predictors below. |
+| `enhanced_safety_expert_coverage` | Enhanced safety plus two DougScore coverage/source fields only. |
+| `full_youtube_expert_coverage` | Enhanced safety plus the selected 40 YouTube predictors and two DougScore coverage/source fields. |
+| `full` | Enhanced safety plus the selected 40 YouTube predictors and 10 DougScore predictors. |
 
-`enriched` remains an alias for the enhanced-safety predictor definition. vPIC selection is defined by `VPIC_FEATURE_COLUMNS`, `TRUCK_FEATURE_COLUMNS`, and `EV_HEV_FEATURE_COLUMNS`; decoder IDs and combined cohort labels are not predictors. All variants retain the same listing eligibility and lowercase-VIN join, with matching year/make/model family partitions. YouTube variants add a validated many-to-one make join; expert variants add year/make/model and make joins without dropping unmatched listings. Support flags identify absent evidence. Source Parquet schemas and profiles remain unchanged.
+`enriched` remains an alias for the enhanced-safety predictor definition. vPIC selection is defined by `VPIC_FEATURE_COLUMNS`, `TRUCK_FEATURE_COLUMNS`, and `EV_HEV_FEATURE_COLUMNS`; decoder IDs and combined cohort labels are not predictors. All variants retain the same listing eligibility and lowercase-VIN join, with matching year/make/model family partitions. YouTube variants add a validated many-to-one make join; expert variants add year/make/model and make joins without dropping unmatched listings. Support flags identify absent evidence.
+
+Price predictors exclude listing `engine_displacement`, `maximum_seating_numeric`, `listing_color`, `fuel_type` and `body_type`. Enriched variants retain decoded `DisplacementL`, `Seats`, `FuelTypePrimary`, `BodyClass` and `EngineKW`; listing horsepower remains selected. Source schemas and profiles are unchanged.
 
 Saved explanation tables under `MODEL_OUTPUT/<variant>/<run>/` contain a deterministic sample of up to 1,000 test rows (`shap_inputs.parquet`), their `vin`, `test_row`, cohort/split dimensions and USD `actual_price` (`shap_receipt.parquet`), and up to 100 fit-plus-validation background rows (`shap_background.parquet`). Inputs include training-imputed numeric values, categorical vocabularies, and numeric missing indicators. Later SHAP uses the exact saved predictor; its additive scale is `ln(price in USD)`. Classical-estimator explanations use scaled numeric and one-hot categorical dimensions, labeled by their saved transformer.
 
+### Selected predictor exclusions after multicollinearity review
+
+The following additional 29 fields are excluded from future price-model inputs; source fields, export profiles, row eligibility and cohort/VIN linkage remain unchanged. These selections apply to all estimators using the corresponding feature block and do not establish predictive improvement. Existing saved predictors require retraining.
+
+| Block | Additional excluded columns | Selected representative / interpretation |
+| --- | --- | --- |
+| Base | `highway_fuel_economy` | Retain `city_fuel_economy`. |
+| vPIC | `WheelSizeRear`, `EngineCylinders`, `SeatRows` | Retain `WheelSizeFront`, `DisplacementL`, `horsepower`, `Seats`. |
+| vPIC | `Axles`, `BrakeSystemType`, `CoolingType`, `ESC` | Single observed nonmissing value in the audited fit population; removing these also removes their source-coverage signal. |
+| Structured NHTSA | `injury_report_count` | Retain `reported_injuries`; the aggregation helper still computes both for audit use. |
+| Expert | `doug_review_count`, `doug_cool_factor` | Retain `doug_model_count`, `doug_fun_factor`. |
+| YouTube constants | `yt_feature_row_present`, `yt_performance_missing` | Constant in the audited fit population. |
+| YouTube overall | `yt_overall_video_balanced_soft_net`, `yt_overall_mean_confidence`, `yt_overall_mean_margin`, `yt_overall_low_confidence_share` | Retain hard net, entropy and both log-support counts. |
+| YouTube reliability | `yt_reliability_mean_confidence`, `yt_reliability_mean_margin` | Retain hard/soft nets, entropy, low-confidence share, counts and missing flag. |
+| YouTube comfort / maintenance cost | `yt_<aspect>_video_balanced_soft_net`, `yt_<aspect>_mean_confidence`, `yt_<aspect>_mean_margin`, `yt_<aspect>_mean_entropy`, `yt_<aspect>_low_confidence_share`, for `comfort` and `maintenance_cost` | Retain hard net, counts and missing flag; source support remains two/four makes, respectively. |
+
+Selected raw predictor counts are base 32; enhanced 79; enhanced_safety/enriched 98; full_youtube/full_youtube_sentiment 138; enhanced_safety_expert 108; enhanced_safety_expert_coverage 100; full_youtube_expert_coverage 140; full 148. Full comprises 47 categorical and 101 numeric inputs (14 binary flags and 87 other numeric candidates). Generated missingness indicators follow the selected numeric fields under the existing preprocessing policy; this change does not deduplicate them.
+
+The preserved multicollinearity execution audited the former 177-input selection. Its numerical results remain historical evidence for these exclusions; rerun it to measure remaining dependencies in the 148-input selection.
+
+### Correlation and multicollinearity analytical inputs
+
+`MODELS/Full_Feature_Multicollinearity.ipynb` reads the current `full` predictor schema dynamically. It reproduces the default cohort-stratified split on the complete eligible population, profiles every fitting row, and samples at most 30,000 fitting VINs deterministically for diagnostics. `MAX_DIAGNOSTIC_ROWS=None` removes that diagnostic bound.
+
+| Diagnostic field / output | Definition |
+| --- | --- |
+| `feature_profile.csv` | Every selected predictor's type, complete-fit observed/distinct counts, missing share, constant status and diagnostic-sample distinct count. A constant observed value with varying missingness is separate from an entirely constant field. |
+| `numeric_pairs.csv` | Observed-pair Pearson/Spearman coefficients, overlap count/share, missingness correlation and IID-only exploratory p/BH q values. Default minimum overlap is 100; repeated make/family evidence prevents ordinary significance interpretation. |
+| `categorical_pairs.csv`, `category_numeric_pairs.csv` | Bias-corrected Cramér's V, both directional modal mappings and category–numeric eta. Missing categories are explicit; numeric eta excludes missing numeric values. High-cardinality screens require review. |
+| `youtube_make_sensitivity.csv` | Numeric YouTube pair correlations weighted equally by decoded Make, with observed-make overlap, beside listing-weighted correlations. |
+| Numeric design diagnostics | Current training-median imputation plus numeric missingness indicators, fitted on diagnostic fitting rows only. Per-variant VIF/rank/condition spectra use identical rows and record sample-constant columns. Numerical aliases receive infinite VIF. Variance-decomposition proportions use a tolerance floor for singular directions. |
+| Mixed design diagnostics | All numeric/indicator inputs plus categorical one-hot columns with `min_frequency=20`, at most 12 levels including the infrequent pool, and a dropped reference. This diagnostic representation differs from production encoding; per-dummy VIF is not whole-term GVIF. Encoding and dependencies are saved. |
+| `feature_review.csv`, `variant_feature_review.csv` | Evidence-linked full-set retain/review/exclusion-candidate actions. Variant rows add their own numeric-design VIF; full-set partners/actions require checking against the smaller variant. Constants/all-missing fields are candidates, not automatic schema changes; correlated groups require matched validation ablations. |
+| Provenance | Fresh `MODEL_OUTPUT/multicollinearity/<timestamp>/` contains source/code hashes, split/diagnostic VIN receipts with separate decoded cohort columns, tables, figures and numerical validation checks. No price or identifier enters the diagnostic design. |
+
 ### Exploratory PCA analytical inputs
 
-`MODELS/PCA.ipynb` analyzes the current `full` price-model inputs using all eligible **fit-partition** listings from the existing seed-42 year/make/model split. Validation/test values do not fit numerical preprocessing or PCA. The six source schemas and their profiles remain unchanged.
+`MODELS/PCA.ipynb` analyzes the current `full` price-model inputs using all eligible **fit-partition** listings from the existing seed-42 year/make/model split. Validation/test values do not fit numerical preprocessing or PCA.
 
 | Block / output | Definition |
 | --- | --- |
-| PCA candidates | 92 numerical measurements, counts, scores, and semantic coordinates from the 173 selected full-model predictors. Includes listing-derived numerical fields, vPIC specifications, NHTSA numerical aggregates, YouTube coordinates/shares/counts, and nine DougScore categories plus review/model counts. Correlated representations remain separate. |
-| Retained outside PCA | 53 categorical fields; 28 numerical binary fields: nine option flags, two NHTSA source-presence flags, 15 YouTube presence/support/missingness flags, and two DougScore availability flags. Generated `<numeric_feature>__missing` indicators are also excluded. The saved field inventory records every selected predictor's role. |
+| PCA candidates | 87 numerical measurements, counts, scores, and semantic coordinates from the 148 selected full-model predictors. Includes listing-derived numerical fields, vPIC specifications, NHTSA numerical aggregates, YouTube coordinates/shares/counts/sentiment/uncertainty, and eight DougScore categories plus model count. Raw mileage and the selected redundant listing/YouTube fields are excluded. |
+| Retained outside PCA | 47 categorical fields; 14 numerical binary fields: nine option flags, two NHTSA source-presence flags and three retained YouTube missingness flags. Generated `<numeric_feature>__missing` indicators are also excluded. The saved field inventory records every selected predictor's role. |
 | Numerical preprocessing | Nonfinite values become missing. Fit-only entirely missing/constant fields are excluded; remaining values use fit medians and zero-mean/unit-population-variance scaling. Profiles retain observed support, missing percentage, bounds, exclusion reason, medians, and fitted means/scales. No coverage-based sparsity cutoff is applied. |
 | Spectrum | Complete, unwhitened PCA of the standardized numerical block. `spectrum.csv` records component number, eigenvalue, individual/cumulative/remaining variance, and normalized chord distance. The variance denominator excludes categories, flags, and price. |
 | Elbow candidate | Interior scree point with maximum perpendicular distance from the endpoint chord after both axes are normalized to [0, 1]. Fewer than three components, a flat spectrum, or maximum distance <=0.001 is inconclusive. This geometric heuristic does not establish a sharp or prediction-optimal cutoff. |
@@ -542,7 +547,7 @@ Saved explanation tables under `MODEL_OUTPUT/<variant>/<run>/` contain a determi
 | Component interpretation | `component_weights.csv` gives eigenvector weights on standardized fields. `feature_component_correlations.csv` gives numerical field/component correlations, accounting for PCA's sample-variance convention. Signs are arbitrary; neither table establishes predictive or causal importance. |
 | Provenance / validation | Fresh `MODEL_OUTPUT/pca/<timestamp>/` retains source/enrichment/cohort-policy hashes, lowercase-VIN split receipt with separate decoded cohort keys, fit-only coverage, fitted imputer/scaler/PCA, figures, and numerical checks. Equal listing weighting preserves repetition of make/family-level features; imputation and duplicate representations can shape the spectrum. |
 
-**PCA verification (2026-10-24):** Run `20261024T151259780542Z` uses 1,720,358 fit listings across 6,141 year/make/model groups. Of 92 candidates, 88 enter PCA: `yt_comfort_video_balanced_net`, `yt_maintenance_cost_video_balanced_net`, and `yt_performance_video_balanced_net` are entirely missing; `yt_reliability_video_balanced_net` is constant. The elbow candidate is PC10 (58.08% cumulative variance); the first strict >85% crossing is PC31 (85.40%). All saved numerical checks pass. Validation/test rows remain unused for PCA fitting; no PCR count is adopted.
+**Historical PCA verification (2026-10-24):** Run `20261024T151259780542Z` used 1,720,358 fit listings across 6,141 year/make/model groups and retained 88 of its 92 numerical candidates. The elbow candidate was PC10 (58.08% cumulative variance); the first strict >85% crossing was PC31 (85.40%). These results predate the selected sentiment features and do not describe the current 87-candidate spectrum. Rebuild PCA before interpreting current feature variance; validation/test rows must remain excluded from fitting.
 
 ### Principal component regression inputs and coordinates
 
@@ -551,7 +556,7 @@ The `pcr` estimator runs only on `full`, using **31 numerical principal componen
 | Field / artifact | Definition |
 | --- | --- |
 | `components__PC01` through `components__PC31` | Coordinates on exactly 31 unwhitened components of the same numerical candidate block used by the PCA notebook. Training-median imputation precedes training-constant field removal and unit-variance scaling. Entirely missing fields become constant after the existing zero-fill fallback and are excluded from coordinates. Component signs and bases may differ between development and final fits. |
-| Separate regression inputs | All selected categorical predictors use the existing one-hot encoder. The 28 numerical binary flags and all numerical missingness indicators bypass PCA and retain existing classical-model scaling. No identifier or price enters PCA. |
+| Separate regression inputs | All selected categorical predictors use the existing one-hot encoder. The 14 numerical binary flags and all numerical missingness indicators bypass PCA and retain existing classical-model scaling. No identifier or price enters PCA. |
 | Fixed-count training | A single fixed configuration fits on bounded fit rows for validation; final preprocessing, PCA and ordinary linear regression refit on all fit-plus-validation rows. The target is `ln(price)` and predictions use `exp` to return USD. The count remains 31 even if explained variance differs from 85%. |
 | `pcr/pca_summary.json` | Final-training retained/excluded numerical fields, 31 explained-variance ratios, and their cumulative sum. `pcr/predictor.joblib` bundles input preprocessing, PCA, retained inputs and regression for transform-only inference. Normal validation/test prediction receipts and metrics remain unchanged. |
 | Diagnostics comparison | A full-only PCR supplement may have a different implementation hash and unused tree budget from the frozen original suite. Acceptance still requires exact full-source hashes, predictor schemas, split, package versions, preprocessing, target, weighting and tuning budget. Evaluation additionally reconciles held-out VINs, labels, decoded Make and family blocks. Other estimators keep strict code matching. Component coefficients refer to coordinates, not individual original-feature importance. |
@@ -575,6 +580,8 @@ Conflicting complaint versions remain in total counts but not structured summari
 
 ### NHTSA text candidates
 
+Discovery v6 adds a separate, versioned derived export described below. These candidates and existing fitted price-feature definitions retain their original meanings.
+
 Location: `MODEL_OUTPUT/nhtsa_text/<workspace>/`. `listings.parquet` freezes listing partitions; `records.parquet` holds non-conflicting family/source/ID associations; `family_features.parquet` has one family/cutoff row.
 
 | Field pattern | Definition |
@@ -590,22 +597,64 @@ Categories: powertrain, brakes, steering, electrical, airbags, fuel, structure, 
 
 ### Selected YouTube predictors
 
-Location: `YOUTUBE/outputs/price_features_v1/make_features.parquet`. Grain: one canonical `Make`, explicit-comment attribution, cumulative window, cutoff `2026-10-01`. Join through decoded `Make` after lowercase VIN linkage.
+Completed sentiment-v2 export: `YOUTUBE/outputs/sentiment_argmax_20261027T155951/price/make_features.parquet`, with provenance in the adjacent `price_feature_manifest.json`. Grain: one canonical `Make`, explicit-comment attribution, cumulative window, cutoff `2026-10-01`. Join many-to-one through normalized decoded `Make` after linking listings to vPIC on lowercase `vin`. These descriptors apply to makes, not individual vehicles or trim-level cohorts.
 
-| Field block | Definition |
+The export contains **83 rows and 76 columns**: the `Make` key plus **75 predictors** (14 coverage, 16 semantic/topic, 45 sentiment/support/uncertainty). This is the default YouTube input for future price training, NHTSA text comparisons and dashboard evidence. `--youtube-feature-dir` can select another verified sentiment-v2 price export. Existing YouTube price predictors need retraining; selecting these features does not activate a predictor.
+
+Field patterns below expand over eight topics (`design`, `performance`, `comfort`, `technology`, `reliability`, `maintenance_cost`, `fuel_economy_range`, `safety`) and four sentiment aspects (`comfort`, `maintenance_cost`, `performance`, `reliability`). `<group>` is `overall` or one of those four sentiment aspects. Counts are numbers of predictor columns.
+
+| Field / pattern | Type / classification | Count | Definition / interpretation |
+| --- | --- | ---: | --- |
+| `Make` | `String`; nominal key | — | Canonical decoded make, normalized to uppercase with collapsed whitespace; unique and non-null. |
+| `yt_feature_row_present` | `Int8`; binary indicator | 1 | 1 for a matched make row, otherwise 0 after the listing join. |
+| `yt_comment_count`, `yt_eligible_count`, `yt_video_count` | `Int64`; discrete counts | 3 | Deduplicated attributable comments, comments with eligible content, and videos with eligible content, respectively. |
+| `yt_support_suppressed`, `yt_semantic_missing`, `yt_<topic>_topic_missing` | `Boolean`; binary indicators | 10 | Insufficient semantic/topic support; true for unmatched makes after the listing join. |
+| `yt_semantic_01` through `yt_semantic_08` | `Float64`; continuous coordinates | 8 | Training-fitted PCA coordinates of make-masked semantic embeddings; average eligible clauses within comment, comments within video, then videos equally. No fixed coordinate range. |
+| `yt_<topic>_mention_share` | `Float64`; continuous proportions | 8 | Fraction of eligible comments mentioning each topic within video, then equal-video mean; range 0–1. Comments may mention several topics, so shares need not sum to 1. |
+| `yt_<aspect>_video_balanced_net` | `Float64`; continuous scores | 4 | Equal-video mean of `(positive-negative)/(positive+negative+neutral+mixed)` resolved-comment counts; range -1 to 1. |
+| `yt_<aspect>_opinion_count`, `yt_<aspect>_opinion_video_count` | `Int64`; discrete counts | 8 | Resolved comments and opinion-bearing videos for each sentiment aspect; counts remain populated even below support. |
+| `yt_<aspect>_missing` | `Boolean`; binary indicators | 4 | Insufficient resolved-opinion support for each sentiment aspect; true for unmatched makes. |
+
+Price models and NHTSA text comparisons use **40 YouTube predictors: 38 exported fields and two log-transformed support counts**. The raw `yt_overall_opinion_count` and `yt_overall_opinion_video_count` are replaced by their log versions in predictor selection. Excluded: `yt_support_suppressed`, `yt_semantic_missing`, all eight `yt_<aspect>_topic_missing` flags, `yt_overall_missing`, `yt_performance_video_balanced_net`, and performance `video_balanced_soft_net`, `mean_confidence`, `mean_margin`, `mean_entropy`, `low_confidence_share`. The 11 flags were identical in this export; the six performance measurements were entirely null. The additional 18 YouTube exclusions are listed in the selected-exclusions table above. Export validation and dashboard evidence retain all fields. Rebuilding a source export does not automatically change this explicit predictor selection.
+
+The suggested overall-sentiment inputs are the existing `yt_overall_video_balanced_net` and `yt_overall_mean_entropy`, plus these deterministic support transforms. They enter `full_youtube`, `full_youtube_sentiment`, `full_youtube_expert_coverage` and `full`; base and structured-only variants retain their comparison definitions. Other selected YouTube fields remain selected pending the planned experiment.
+
+| Derived price predictor | Definition / handling |
 | --- | --- |
-| `yt_feature_row_present` | 1 for a matched make row, otherwise 0. |
-| `yt_comment_count`, `yt_eligible_count`, `yt_video_count` | Deduplicated comment, eligible-comment, and video counts. |
-| `yt_support_suppressed`, `yt_semantic_missing`, `yt_<aspect>_topic_missing` | Support/missing flags; true for unmatched makes. |
-| `yt_semantic_01` through `yt_semantic_08` | Training-fitted PCA coordinates, balanced across videos. |
-| `yt_<aspect>_mention_share` | Video-balanced discussion share: design, performance, comfort, technology, reliability, maintenance_cost, fuel_economy_range, safety. |
-| `yt_<aspect>_video_balanced_net` | Mean video sentiment net: `(positive-negative)/(positive+negative+neutral+mixed)`. Aspects: comfort, maintenance_cost, performance, reliability. |
-| `yt_<aspect>_opinion_count`, `yt_<aspect>_opinion_video_count`, `yt_<aspect>_missing` | Resolved-opinion support counts and suppression flags for those four aspects. |
+| `yt_overall_log1p_opinion_count` | `ln(1 + yt_overall_opinion_count)`, the total resolved overall-opinion support. |
+| `yt_overall_log1p_opinion_video_count` | `ln(1 + yt_overall_opinion_video_count)`, the number of contributing opinion-bearing videos. |
 
-- Selected export: 83 makes, 73 with semantic/topic support; 46 fields (14 coverage, 16 semantic/topic, 16 sentiment/support).
-- Semantic/topic support needs 20 eligible comments and five videos; sentiment needs 20 resolved opinions and five opinion videos. Unsupported/unmatched measurements are null.
-- Development videos/text, invalid/post-cutoff publication or update dates, and direct numerical price mentions are excluded from features. Normalized exact text is deduplicated within video/make/scope; videos receive equal weight.
-- These are make-level experimental descriptors. Current sentiment has only one populated reliability score (0); other aspect scores are null. `directional_sentiment_available=false`; independent automotive accuracy remains unmeasured.
+Both transforms retain zero as zero and null as null; negative or nonfinite inputs become null. They are computed after the make join, identically for training and inference, before fit-only imputation. They do not weight training rows or alter the signed sentiment score. Raw counts remain available in the source export; the six original source tables and their profiles are unchanged.
+
+The following **29 fields** supply overall sentiment and continuous tone/uncertainty measurements for all five groups:
+
+| Field / pattern | Type / classification | Count | Definition / interpretation |
+| --- | --- | ---: | --- |
+| `yt_overall_video_balanced_net` | `Float64`; continuous score | 1 | Hard-label net over all eligible, make-attributed car opinions, including clauses with multiple topics. Same video-balanced formula and -1 to 1 range as aspect nets. |
+| `yt_overall_opinion_count`, `yt_overall_opinion_video_count` | `Int64`; discrete counts | 2 | Resolved-comment and contributing-video counts for overall sentiment; retained below support. |
+| `yt_overall_missing` | `Boolean`; binary indicator | 1 | Insufficient overall opinion support; true for unmatched makes. |
+| `yt_<group>_video_balanced_soft_net` | `Float64`; continuous scores | 5 | Mean `positive_score - negative_score` across resolved clauses within comment, comments within video, then videos equally; range -1 to 1. Separate from the hard-label net. |
+| `yt_<group>_mean_confidence`, `yt_<group>_mean_margin` | `Float64`; continuous scores | 10 | Winning tone probability and lead over the runner-up, respectively; averaged through the same clause/comment/video hierarchy; range 0–1. These are model scores, not validated correctness probabilities. |
+| `yt_<group>_mean_entropy` | `Float64`; continuous scores | 5 | Entropy of the three tone probabilities divided by `ln(3)`, averaged through the same hierarchy; range 0–1. Higher values indicate less concentrated probabilities. |
+| `yt_<group>_low_confidence_share` | `Float64`; continuous proportions | 5 | Equal-video mean of the fraction of resolved comments with at least one clause having confidence <0.75 or margin <0.15. Argmax retains these opinions; range 0–1. |
+
+- Semantic/topic support requires 20 eligible comments and five eligible videos; each sentiment group independently requires 20 resolved opinions and five opinion-bearing videos. Unsupported scores/shares/coordinates are null, with corresponding flags true. Support counts remain observed for matched makes; unmatched counts and measurements remain null. Missing sentiment is not neutral sentiment.
+- Student tone uses argmax over negative/neutral/positive probabilities. At comment level, opposing clause directions become `mixed`; unresolved contributing evidence leaves the comment unresolved. Facts/questions contribute eligible semantic/topic evidence without becoming neutral opinions. Overall sentiment permits multiple topics; aspect sentiment requires a single eligible topic per clause.
+- Development videos/text, invalid/post-cutoff publication or update dates, and direct numerical price mentions are excluded from features. Truncated/windowed clauses cannot resolve sentiment. Normalized exact text is deduplicated within video/make/scope; cross-video repeats are retained in this export. Videos receive equal weight within each measurement's contributing population.
+
+**Completed full-source profile (2026-10-27):** Relabeling reused cached student probabilities for **1,287,155 comments and 2,872,698 clauses**. Aggregation and price export are complete; 73 of 83 makes pass semantic/topic support. The following profile counts make rows, not listings or independent vehicles. Distinct scores exclude nulls; all populated hard and soft nets are nonzero.
+
+| Sentiment group | Makes with scores | Missing makes | Distinct hard / soft nets | Hard-net range (rounded) |
+| --- | ---: | ---: | ---: | --- |
+| `overall` | 73 | 10 | 73 / 73 | -0.4200 to 0.3606 |
+| `comfort` | 2 | 81 | 2 / 2 | -0.2037 to 0.0769 |
+| `maintenance_cost` | 4 | 79 | 4 / 4 | -0.4423 to -0.1129 |
+| `performance` | 0 | 83 | 0 / 0 | No supported scores. |
+| `reliability` | 16 | 67 | 16 / 16 | -0.4250 to -0.0111 |
+
+`directional_sentiment_available=true` records variation in the export, not validated automotive accuracy or predictive usefulness. The export uses `sentiment_policy=argmax`, temperature 1.0 and `score_calibration=uncalibrated`. The completed optional `evaluation/sentiment_calibration.json` fits temperature 0.5761 on 237 validation clauses and reports teacher agreement on 226 test clauses; that calibration was not applied to this export. Teacher pseudo-label agreement is not independent automotive validation. The manifest retains `validation_status=not_independently_validated` and `interpretation=retrospective_association`; relevance/aspect accuracy and price-model lift remain unmeasured.
+
+Future YouTube workflows use only this selected 75-predictor export or a separately verified replacement with the same schema. Previously fitted models and dated PCA/PCR results require rebuilding before they can describe the selected sentiment features.
 
 ### Selected DougScore predictors
 
@@ -624,7 +673,7 @@ Location: `EXPERT_REVIEWS/outputs/price_features_v2/`. `cohort_features.parquet`
 - Automatic resolution normalizes case/whitespace and existing VW/Chevy/Mercedes make aliases. Combined model/variant names use a unique longest canonical model prefix within the same year/make. No trim assignment or cross-year family match is inferred. Multiple variants of a family contribute equally to its category means.
 - Make support requires **five distinct canonical models**. Average distinct reviews within each model across years/variants, then average model means equally. Conflicting scores for the same normalized reviewed vehicle are excluded from both levels; identical repeats count once.
 - Artifact profile: 585 imported reviews; 106 exact-name and 202 prefix-resolved reviews; 277 unmatched; 302 family rows; 22 supported makes; no conflicting reviews. Counts reflect source reviews, not listing frequency. Family category support ranges from one to three reviews; make review/model counts are stored in the manifest.
-- The nine rating and five support/source fields are selected for price models. Original Value, Daily total, overall DougScore, review IDs, source metadata, and mapping evidence are not price predictors. Quality combines build/material quality with perceived reliability; Practicality combines usability, cargo and fuel economy. They do not isolate corresponding YouTube aspects.
+- Eight rating fields (excluding `doug_cool_factor`) and two support/source fields (`doug_source_level`, `doug_model_count`) are selected for price models. `doug_cool_factor`, `doug_review_count` and both availability flags remain source/audit fields only. Original Value, Daily total, overall DougScore, review IDs, source metadata, and mapping evidence are not price predictors. Quality combines build/material quality with perceived reliability; Practicality combines usability, cargo and fuel economy. They do not isolate corresponding YouTube aspects.
 - `review_resolution.parquet` retains raw names, original scores/totals, automatic matching evidence, and unmatched/conflicting states. `expert_feature_manifest.json` binds source/artifact hashes, source vPIC, policy, coverage, and retrospective interpretation. These artifacts do not change the six model-development source schemas or their profiles.
 - Eligible-listing join profile: 2,792,999 retained rows; 237,978 family matches, 1,819,618 make fallbacks, and 735,403 missing. No rows multiply or drop. `listing_coverage.json` records this check and the expert manifest hash.
 - Historical score availability and revisions remain unverified. Current scores are supplemental expert opinions, not independent sentiment gold labels or historically available price predictors.
@@ -636,13 +685,11 @@ Location: `EXPERT_REVIEWS/outputs/price_features_v2/`. `cohort_features.parquet`
 
 Derived research artifacts use the same selected listing/vPIC snapshot. Original table schemas and price-model features are unchanged. Counts are computed separately for each discovery grain.
 
-The EPA-first classification layer is a derived discovery annotation over this same selected dataset. It does not alter the model-development source tables or price predictors. `epa_group` removes only drivetrain suffixes from compatible EPA `VClass` records; all compatible records must agree on the resulting parent. `common_segment` uses the supplied market-terminology table, supported/predicted size and positioning, or exact normalized illustrative family names. Examples have unverified model-year scope and never establish EPA classes. NHTSA NCAP remains a separate classification.
-
-The activated `20261026-epa-hierarchy-supported-validated` layer retains the same 2,792,993 VINs per grain. Its 18 EPA groups cover 1,822,882 recorded plus 73,409 predicted cohort VINs, and 2,249,807 recorded plus 99,507 predicted model VINs. It has 19 cohort / 21 model common-subsegment terms. Learned EPA labels activate for 499 cohort and 432 model profiles; model positioning activates for 5,847 profiles. Learned size labels remain inactive after held-out deployment checks. Grains overlap and counts are never added across them.
+The legacy EPA-first layer derives separate `epa_group`, `size_segment`, `market_positioning`, `common_segment`, state/provenance fields, and `hierarchy_path` per profile. `epa_group` removes drivetrain suffixes only when compatible EPA records agree; common-segment reference examples have unverified year scope and cannot establish EPA classes. Grains overlap and counts are not additive.
 
 Layer `hierarchy.parquet` retains one row per `profile_id`, `epa_group`, `size_segment`, `market_positioning`, `common_segment`, their states, the terminology URL and `hierarchy_path`. States distinguish recorded evidence, predictions, derived terminology, unknowns and reference examples with unverified year scope. Source-trained predictions retain probability, policy, outer fold and model URI; unknowns are not negative examples. Development-family macro F1 selects logistic regression without make or an ExtraTrees ensemble with make. Fitting and selection exclude the entire query family fold and require three training families per class. Probability >=0.70 plus >=80% source agreement across at least three development emitted-label families permits an experimental prediction; probabilities are uncalibrated. `classifier_metrics.csv` reports held-out family agreement with source labels, not independently reviewed accuracy. `deployment_support.csv` requires >=80% agreement across at least ten outer held-out emitted-label families before a class activates; weak classes remain inactive. These held-out results are used for deployment decisions. The activated immutable layer ends in `-validated`. Human review and peer review are optional for this layer. Counts reconcile separately for cohort and model discovery; the two populations overlap.
 
-The active 2026-10-26 v5 repair retains 2,792,993 VINs per grain. It produces 21,443 cohort profiles (16,140 complete identities) and 11,069 model profiles (10,578 complete identities). Fold-specific feature checks admit 10,760 cohort and 6,238 model profiles. Model-level identity includes 510,479 missing-trim VINs; 363,934 have supported direct peers. Counts overlap across grains and are never added. Independently reviewed classifier labels and peer-quality promotion remain pending and optional; the separate source-trained layer supplies experimental predictions. Dashboard clustering reads the saved v5 fits without refitting on filter changes.
+V5 run `20261026-repair/run-reconciled` is a legacy comparison; the current selected discovery profile is recorded in v6 below.
 
 | Derived field/artifact | Definition |
 |---|---|
@@ -660,3 +707,30 @@ The active 2026-10-26 v5 repair retains 2,792,993 VINs per grain. It produces 21
 | Prediction policies | Conservative precision >=95%, Wilson lower 95% bound >=85%; broader precision >=90%, lower bound >=80%. Both require >=30 independently reviewed emitted-label test families. Inactive/unsupported labels abstain. Precision, recall, coverage and calibration are reported per label/grain. |
 | Saved groups and peers | Body-family specification discovery remains available without semantic labels. Family-balanced K-means/Gower/hierarchical fits preserve support and ARI gates; medoid/hierarchical reference distances require common observed evidence. All methods use development 95th-percentile assignment radii. Peer adjustments are bounded category bonuses and cluster penalties, each at most 0.10. |
 | Coverage | Category tables distinguish pending/deferred/rejected/missing references, ambiguous scope, absent claims and local evidence failures. Cluster support and rejection are separate from category coverage. Listing counts reconcile within each grain; overlapping labels are not additive. |
+
+### Vehicle discovery v6 derived features
+
+These outputs derive from the selected listing/vPIC/NHTSA snapshot. They do not add source rows or change existing price-predictor schemas. Active full run `20261104T204904-listing-first`, completed, validated and activated on November 5, 2026, maps 2,792,993 VINs into 10,827 model/body/propulsion profiles or 21,226 trim-cohort profiles. These populations overlap. Model profiles include 491 incomplete identities and 96 unresolved bodies; trim-cohort profiles include 5,238 incomplete identities and 98 unresolved bodies. Both grains retain 1,378 VINs with unresolved bodies. Coverage is recorded in the selected run's `prepared/coverage.csv`.
+
+The active run uses body policy `source_body_v2_listing_first`. `used_cars.body_type` takes precedence over `NHTSA_vPIC.BodyClass`, including source disagreements, after linkage on lowercase `vin`. Only a blank/missing listing label falls back to vPIC; existing missing markers (`UNKNOWN`, `NOT APPLICABLE`, `N/A`, `--`) count as absent. Nonblank unrecognized listing labels remain unknown and retain listing provenance. Case, whitespace, brackets, separators and hyphens normalize for exact vocabulary lookup; generic Truck or incomplete chassis does not imply a specific style. Source precedence resolves the chosen category without establishing that either source is independently correct. No classifier, price, model-name guess or external category prediction resolves a source disagreement. Raw source fields and price predictors remain unchanged.
+
+| Field/artifact | Grain and definition |
+| --- | --- |
+| `family_id`, `family_block`, `fold` | Separate decoded year/make/model fields remain available. Normalized year/make/model ID; alias-aware Make/Model block; deterministic five-family-fold assignment. Years and trims of one mapped family share a fold. IDs are keys, not predictors. |
+| `body_style`, `body_family`, `body_partition` | Normalized style selected from the listing first, otherwise vPIC, or `unknown`; corresponding supported passenger-car/SUV/pickup/van family or `unknown`; discovery partition equal to the selected style. A recognized listing resolves source disagreements, including cross-family conflicts. Both grains group on these body fields and propulsion, preserving one membership per retained VIN. |
+| Body provenance | VIN-level `body_selected_source` is `listing`, `vpic` or `unknown`, including the provenance of unrecognized values. `body_resolution` is `agreed`, `listing_preferred` (differing recognized styles), `listing`, `vpic`, or `unknown`. Boolean `body_detail_conflict` and `body_family_conflict` retain disagreements independently of the selected label. Profiles retain sorted `body_resolution_states` and the corresponding `body_detail_conflict_n`, `body_family_conflict_n` and `body_listing_preferred_n` counts. `prepared/body_evidence.parquet` retains lowercase `vin`, separate decoded cohort columns, raw source values, normalized labels, selected source, decisions and flags; `body_reconciliation.csv` counts each source/decision combination. Audit fields are not specification coordinates or price predictors. |
+| `category`, `fallback_level` | Display body category from the selected `body_partition`, plus explicit trim/model-body-propulsion scope. Unrecognized selected styles receive **Body unresolved** and remain outside specification fitting. Other profiles still require the existing identity, numeric support and cluster acceptance gates. Earlier `source_body_v1` bundles remain readable with their broad-only contexts; new listing-first runs assign detailed styles when recognized. Unknown market positioning/EPA terms do not block these groups. |
+| Body coverage | `prepared/coverage.csv` reports unresolved/unknown assignments, `body_listing_preferred`, and original detailed/cross-family source disagreements. Flag-row profile counts identify profiles containing affected VINs; listing counts sum the individual flags, not all VINs in those profiles. Disagreement counters can stay positive after listing precedence resolves the assignments. The legacy `body_broad_only` counter is zero for new runs. Reasons overlap and must not be summed. |
+| Specification context | Grain × broad body × excluded query-family fold. Development-only supported fields, equal size/powertrain block distances, cluster description/status and 95th-percentile assignment radius. Prices and NHTSA outcomes are excluded from specification coordinates. |
+| `record_id`, `document_id`, narrative hash | Global complaint/campaign identity, source plus non-conflicting narrative version, and normalized model-text identity. Global conflicting versions and multi-family complaints are excluded from primary text profiles. Distinct incidents remain separate after fitting-document deduplication. |
+| `period`, evidence cutoff | `historical` through `2020-12-31`; `latest_saved` through recorded build cutoff. Filing/receipt date governs eligibility. Source-version availability and collection completeness remain unverified. Separately fitted periods/channels/representations have incomparable coordinate axes and cluster IDs. |
+| `vectors.npy`, `vector_store.json` | Per-document TF-IDF/SVD vectors or a pointer to shared L2-normalized MiniLM vectors. Long text is chunked and pooled once per record. Encoders/reducers and issue partitions exclude the query family's entire fold and shared campaign/narrative identities. |
+| `family_vectors.npy`, `family_vector_index.parquet` | L2-normalized sum of eligible distinct-record vectors, indexed by family. Supports original-space cosine similarity; coordinates are neither calibrated probabilities nor safety/reliability scores. |
+| Component counts/shares | Eight source-component categories. Counts use distinct retained source records; shares divide by retained records from that source. Categories may overlap. An absent source remains absent, rather than a zero-risk row. |
+| `supported`, `usable_text_count`, `record_count` | Descriptive support: at least 20 usable complaint summaries or one usable recall summary; summaries require 20 characters. This is not collection completeness or validated semantic accuracy. |
+| `theme_<id>_share` | Fraction of usable distinct family/channel records assigned to the development-fitted issue group; rejected documents remain in the denominator. IDs are context-local. Automatic theme meanings remain unreviewed. |
+| Chart projection artifacts | Display-only SVD/PCA locations, explained variance and actual term/feature loadings or projected development-theme prototypes. Numeric display imputation is development-fitted and never establishes a hard requirement. Missing source observations remain unknown. |
+| Safety projection | Tested safety variants; invalid/zero stars become null. Separate rating eras; side/pole/rollover support cross-class display. Overall/frontal recommendation comparisons additionally require applicable variants, supported curb-weight bounds, class agreement and ±250 lb context. No historical safety-version reconstruction. |
+| Model-relative price | `(saved held-out predicted USD − advertised USD) / predicted USD`. Historical ranking uses saved test-partition predictions from a compatible selected model. This is not a verified discount or a measure of condition. |
+
+The selected latest-saved text cutoff is `2026-11-04`, with maximum retained evidence date `2026-09-23`; collection completeness remains unverified. Historical text remains limited to `2020-12-31`. Fourteen of 40 model contexts and ten of 40 trim-cohort contexts accepted cluster partitions; the remaining contexts use direct retrieval. The safety bundle retains 7,170 tested variants. Both rating-era projection receipts report `insufficient_support`, which does not remove available star ratings. Peer rows retain `profile_id`, separate cohort columns, `specification_distance`, and reference-context `description`, `status`, and `shared_cluster`; unsupported cluster comparisons are null.

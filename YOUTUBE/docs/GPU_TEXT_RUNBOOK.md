@@ -141,72 +141,90 @@ opinion-bearing videos. Neutral and mixed opinions remain in the net denominator
   On out-of-memory errors, use fresh paths with scoring `--batch-size 16` or
   training `--batch-size 8 --accumulation 4`.
 - `teacher_agreement_macro_f1` measures distillation fidelity, not sentiment
-  accuracy. Low-confidence students abstain; inspect coverage before expanding.
+  accuracy. Student argmax retains uncertainty; optional threshold decisions
+  abstain. Inspect exported coverage and human-reviewed accuracy separately.
 - Run focused software checks with
   `.\.venv-youtube\Scripts\python.exe -m unittest YOUTUBE.tests.test_text_pipeline -v`.
 
-## Completed local benchmark (2026-10-05)
+## Sentiment v2 decisions and evaluation
 
-The isolated CUDA environment is installed. Saved artifacts:
+Student scoring now defaults to `--sentiment-policy argmax`. Teacher scoring and
+training pseudo-label selection retain confident labels. Content routing, target
+attribution, date limits, development exclusions and 20-opinion/five-video support
+remain enforced. Aspect sentiment still needs one eligible topic. Overall car
+sentiment includes eligible opinions with multiple topics. Both hard-label net
+and continuous `positive_score-negative_score` are averaged within comments,
+within videos, then equally across videos. Uncertainty remains explicit.
 
-- `outputs/text_development_v1`: 12,000 raw comments; protected material excluded.
-- `outputs/text_teacher_v2`: 29,244 clauses, 147.2 scoring seconds excluding initial
-  downloads/loading; 81.5 comments/second and 1.09 GiB peak allocated VRAM.
-- `outputs/text_models_v3`: both students trained for three epochs. Content uses
-  6,322 confident training clauses (6,112 opinions, 91 facts/questions, 119 creator
-  comments); sentiment uses 1,741 (426 negative, 479 neutral, 836 positive).
-  The reducer fits 3,015 eligible training clauses. Earlier versions preserve
-  class-balancing comparisons; model selection used validation.
-- Validation teacher-agreement macro F1: **0.681 content**, **0.722 sentiment**.
-  Fact/question F1 is 0.308 on eight validation examples; `irrelevant` has no
-  confident training examples. The students remain experimental candidates.
-- `outputs/text_benchmark_v1` and `text_benchmark_scored_v1`: separate seed-44
-  2,000-comment sample; 7.8 scoring seconds excluding loading (256.3 comments/s).
-  Included videos/text have zero overlap with all development partitions.
-- `outputs/text_benchmark_features_v1`: 119 wide, 952 long and 4,928 video rows.
-  Six cumulative make/scope cells pass semantic/topic support (BMW, Honda, Tesla,
-  Toyota). **No aspect-sentiment cell passes support in this small benchmark**.
-  Full-source coverage was not yet measured during that benchmark; the completed
-  source run below records its current coverage.
-- `outputs/text_benchmark_expert_v1`: 952 descriptive panel rows; zero approved
-  expert identities, so expert coverage stays missing. No blended score is created.
-
-All 37 YouTube software checks pass. Actual artifacts passed split separation,
-independent feature exclusions, grain uniqueness and suppression checks; scoring
-resume was verified. The new README Mermaid passed static lint/schema validation.
-Commands above use fresh v4 paths; to reuse trained models, supply
-`--model-dir YOUTUBE/outputs/text_models_v3`. The benchmark remains separate from
-the subsequently completed full-source run below.
-
-## Completed full-source run (verified 2026-10-06)
-
-The saved `outputs/text_source_v1` preparation contains 1,287,155 eligible comments
-across 2,999 videos, from the 1,981,686-comment source snapshot, using the
-`2026-10-01` publication/update cutoff. `outputs/text_scored_v1/score_manifest.json`
-is complete: 1,287,155 comments and 2,872,698 clauses scored with `text_models_v3`.
-Its recorded scoring duration is 4,300.3 seconds and peak allocated VRAM is 0.383 GiB.
-
-`outputs/text_features_v1/feature_manifest.json` is also complete: 273 wide make
-rows, 2,184 long make/aspect rows, and 312,696 video feature rows across the separate
-attribution/window policies. Development-video/text exclusions and suppression
-rules remain applied. These are retrospective feature artifacts, not automotive
-accuracy measurements.
-
-`outputs/price_features_v1/price_feature_manifest.json` freezes the selected
-explicit-comment/cumulative view: 83 unique makes, 73 supported semantic/topic
-makes, and 46 candidate predictors. There are no populated comfort,
-maintenance-cost, or performance sentiment nets; the only populated reliability
-net is zero. The manifest records `directional_sentiment_available=false`.
-Compare coverage and semantic/topic additions separately before interpreting any
-sentiment-block increment.
-
-The current [full price comparison](../../README.md#full-comparison-including-youtube-and-all-makes)
-uses this selected export. Reuse completed source/score/feature outputs;
-reproduction requires fresh directories. `price-export` can select a fresh export
-without repeating GPU inference:
+Rebuild student decisions from cached `text_scored_v1` probabilities without retraining or GPU inference. Use a fresh run directory and stop on failure:
 
 ```powershell
-.\.venv-youtube\Scripts\python.exe -m YOUTUBE.text_pipeline price-export --feature-dir YOUTUBE/outputs/text_features_v1 --output-dir YOUTUBE/outputs/price_features_v2
+$PythonExe = '.\.venv-youtube\Scripts\python.exe'
+$RunRoot = 'YOUTUBE/outputs/sentiment_argmax_' + (Get-Date -Format 'yyyyMMddTHHmmss')
+& $PythonExe -m YOUTUBE.text_pipeline relabel --score-dir YOUTUBE/outputs/text_scored_v1 --output-dir "$RunRoot/scored"
+if ($LASTEXITCODE -ne 0) { throw 'Relabel failed' }
+& $PythonExe -m YOUTUBE.text_pipeline aggregate --score-dir "$RunRoot/scored" --model-dir YOUTUBE/outputs/text_models_v3 --output-dir "$RunRoot/features" --as-of 2026-10-01
+if ($LASTEXITCODE -ne 0) { throw 'Aggregation failed' }
+& $PythonExe -m YOUTUBE.text_pipeline price-export --feature-dir "$RunRoot/features" --output-dir "$RunRoot/price"
+```
+
+`relabel --resume` requires identical inputs, policy, calibration, and code. Preserved embeddings make full-source relabel outputs large; use one writer per output directory.
+
+Evaluate the existing student and fit an optional temperature on development
+validation videos; test-video results include all-row and accepted-only reports:
+
+```powershell
+& $PythonExe -m YOUTUBE.text_pipeline evaluate-sentiment --teacher-dir YOUTUBE/outputs/text_teacher_v2 --model-dir YOUTUBE/outputs/text_models_v3 --output-dir "$RunRoot/evaluation" --device cpu --cpu-threads 4
+```
+
+The result is `sentiment_calibration.json` and `review_predictions.csv`. Default
+labels are teacher pseudo-labels, not human gold labels. The sample is conditional
+on confident teacher opinion routing; this does not measure full content/aspect
+accuracy. Existing historical model-selection/test use remains disclosed.
+Calibration changes score scale, not the argmax class. Use an optional
+`--calibration "$RunRoot/evaluation/sentiment_calibration.json"` with `relabel`
+or student `score` in another fresh output directory for a calibrated comparison.
+The artifact must match the model manifest; label source is recorded downstream.
+
+For reviewed calibration, fill `human_label` (`negative`, `neutral`, `positive`)
+and `reviewer` in a copy of `review_predictions.csv`, then run `evaluate-sentiment`
+with `--review-csv <copy.csv>` and a fresh output directory. Unlabeled rows are
+omitted. Text/video keys cannot change or repeat. Both preserved validation and
+test video partitions must contain all classes. Review content relevance and
+aspect assignment separately before claiming independent automotive accuracy.
+
+To rerun inference rather than reuse cached probabilities:
+
+```powershell
+& $PythonExe -m YOUTUBE.text_pipeline score --input-dir YOUTUBE/outputs/text_source_v1 --backend student --model-dir YOUTUBE/outputs/text_models_v3 --output-dir "$RunRoot/rescored" --device cuda --batch-size 32 --sentiment-policy argmax
+```
+
+Train a validation-only price comparison after the export exists (40 of its 75 candidate fields are selected):
+
+```powershell
+& .\.venv\Scripts\python.exe -m MODELS.Price_ML_Models --model-type full_youtube_sentiment --youtube-feature-dir "$RunRoot/price" --models catboost --sample-size 100000 --validation-only --device auto
+```
+
+Use identical listing samples/splits for comparisons with `enhanced_safety`; select on validation before final testing. This does not activate a dashboard predictor. Saved predictors retain the exact export/manifest and reject incompatible schemas. Selected field definitions, aspect support, and calibration status are in the [dictionary](../../DATA_DICTIONARY.md#selected-youtube-predictors).
+
+## Saved runs
+
+These recorded measurements exclude initial model loading/downloads; they are not accuracy or future-runtime guarantees.
+
+| Artifact under `YOUTUBE/outputs/` | Recorded evidence |
+| --- | --- |
+| `text_development_v1` / `text_teacher_v2` | 12,000 comments, 29,244 clauses; teacher scoring 147.2 s, 1.09 GiB peak VRAM. |
+| `text_models_v3` | Three-epoch students; 6,322 content and 1,741 sentiment training clauses; reducer fitted to 3,015 eligible clauses. Validation teacher-agreement macro F1: 0.681 content, 0.722 sentiment; fact/question support is sparse and `irrelevant` was unlearned. |
+| `text_benchmark_v1` / `text_benchmark_scored_v1` | Separate 2,000-comment seed-44 sample; 7.8 s, zero development video/text overlap. |
+| `text_benchmark_features_v1` | 119 wide, 952 long, 4,928 video rows; six supported semantic/topic make/scope cells, no supported aspect sentiment. |
+| `text_source_v1` / `text_scored_v1` | Complete 1,287,155-comment, 2,999-video source run; 2,872,698 clauses, 4,300.3 s, 0.383 GiB peak VRAM. |
+| `text_features_v1` | 273 wide, 2,184 long, 312,696 video rows across separate policies/windows. |
+| `sentiment_argmax_20261027T155951/price` | Selected sentiment-v2 export: 83 makes, 75 candidate predictors; 73 makes have semantic/topic and overall sentiment support. |
+
+Reuse trained `text_models_v3` for compatible inference. To copy the selected feature view without GPU scoring:
+
+```powershell
+.\.venv-youtube\Scripts\python.exe -m YOUTUBE.text_pipeline price-export --feature-dir YOUTUBE/outputs/sentiment_argmax_20261027T155951/features --output-dir YOUTUBE/outputs/price_sentiment_v2_copy
 ```
 
 ## Price experiment and expert baseline
@@ -218,19 +236,4 @@ must be addressed before historical price claims. An earlier cutoff needs teache
 students and the reducer prepared/trained with that earlier text cutoff; later-fit
 artifacts are rejected. All dated features remain retrospective extractions.
 
-Use the existing `sentiment_pipeline.py expert` and `compare` route for the separate
-DougScore reference and approved-identity panels. `compare` accepts both legacy
-experimental and new text make-feature Parquets with their manifest hashes:
-
-```powershell
-.\.venv-youtube\Scripts\python.exe YOUTUBE\sentiment_pipeline.py compare --reference-dir YOUTUBE\outputs\dougscore_reference_v1 --feature-dir YOUTUBE\outputs\text_features_v4 --output-dir YOUTUBE\outputs\text_expert_comparison_v4
-```
-
-Compare structured baseline,
-coverage-only, expert-only, semantic/topic, sentiment, and expert-plus-community
-features on identical VIN samples/grouped splits when timing permits. Select one
-make/scope/date/window wide row per listing: joining all policies duplicates rows.
-Keep `ModelYear`, `Make`, `Model`, `Trim` separate and use lowercase vPIC `vin`.
-Static make features can merely re-encode Make; they are not observed cohort
-sentiment. No in-domain NLP accuracy claim is possible without independent gold
-evaluation, and no new annotation round is required to run these experiments.
+The [legacy sentiment plan](EXPERIMENTAL_SENTIMENT_FEATURE_PLAN.md#expert-reference-and-evaluation) owns the separate `expert`/`compare` commands; [expert integration](../../EXPERT_REVIEWS/DOUGSCORE_INTEGRATION_PLAN.md) owns review matching. Price workflows and matched ablations are in the [README](../../README.md#nhtsa-and-youtube-feature-comparison). Select one make/scope/date/window row per listing to prevent row multiplication. Make-level opinions remain distinct from cohort outcomes; independent automotive NLP validation is still pending.

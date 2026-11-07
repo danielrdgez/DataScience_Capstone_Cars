@@ -15,7 +15,7 @@ import pyarrow.parquet as pq
 
 from YOUTUBE.sentiment.common import (
     ROOT, ASPECTS, atomic_json, cutoff_date, file_hash, load_json, make_matcher,
-    new_dir, normalized, parse_date, text_hash, utc_now, versions,
+    new_dir, parse_date, text_hash, utc_now, versions,
 )
 
 MODEL_IDS = {

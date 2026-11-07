@@ -7,7 +7,7 @@ is retained for the optional supervised pilot. New raw-source processing follows
 This pilot first labels whether a comment discusses a vehicle, then asks whether
 it expresses an opinion about the target make.
 All collected videos are car reviews; video eligibility is not filtered. It does
-not score reliability or add features to the modeling dataset yet.
+not measure reliability or change selected model inputs.
 Keep `comment_id`, `video_id`, and the original `text` unchanged in the sample.
 
 ## Video make context
@@ -42,28 +42,7 @@ concerns purchase price, depreciation, and value. A remark such as “CVT sucks�
 is short but potentially relevant; it must not be excluded by a length rule.
 “Great video!” is about the creator or video, even if the video features a car.
 
-Before training a relevance classifier, independently label part of the same
-sample with a second reviewer and reconcile disagreements. Check proposed
-`prefilter_reason` rows for genuine car opinions. Only confirmed high-precision
-skip rules should bypass later sentiment inference; uncertain comments remain
-eligible for scoring or review.
-
-The current Toyota sample records user feedback by stable `comment_id` in
-`comment_relevance_feedback.csv`. Its `vehicle_relevant` field is `yes` for all
-175 user-confirmed vehicle-specific comments and `no` for the 65 confirmed
-exclusions. Use both groups to train and evaluate vehicle relevance. Rows
-marked `not_vehicle_specific` must not go to aspect sentiment scoring. A
-`vehicle_specific` label confirms relevance to a vehicle, but does not by
-itself establish the target make, an expressed opinion, or an aspect polarity;
-those labels remain blank until assessed. The `csv_row` in the feedback file
-includes the header as row 1, matching spreadsheet row numbers.
-
-`evaluate_comment_relevance.py` uses these confirmed labels to compare a
-grouped-by-video text classifier with the exact filler skip rule. Its output
-contains out-of-fold scores for error review, not labels to copy back into the
-sample. The existing negative set is dominated by easy filler comments, so
-collect additional non-filler exclusions before relying on a model to reject
-comments automatically.
+Toyota feedback is keyed by `comment_id`; `vehicle_specific` confirms relevance only, and `not_vehicle_specific` excludes aspect scoring. It does not establish make, opinion, or polarity. The [relevance runbook](RELEVANCE_ROUND_RUNBOOK.md) owns label recovery, review, and classifier validation.
 
 ## Structured make and aspect rounds
 

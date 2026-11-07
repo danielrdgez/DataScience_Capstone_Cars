@@ -11,6 +11,7 @@ import importlib.metadata
 import json
 from pathlib import Path
 import shutil
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -21,13 +22,14 @@ from car_app.data import ROOT
 from car_app.artifacts import hash_file, stat_key
 
 CONFIG = ROOT / "car_app/artifact_registry.json"
-VARIANTS = ("base", "enhanced", "enhanced_safety", "full_youtube",
+VARIANTS = ("base", "enhanced", "enhanced_safety", "full_youtube", "full_youtube_sentiment",
             "enhanced_safety_expert", "enhanced_safety_expert_coverage",
             "full_youtube_expert_coverage", "full")
 COMMON_SOURCES = ("used_cars.parquet", "NHTSA_vPIC.parquet", "NHTSA_Complaints.parquet",
                   "NHTSA_Recalls.parquet", "NHTSA_Safety.parquet")
 COMPARISON_KEYS = ("split_fingerprint", "split_strategy", "preprocessing_version", "code_fingerprint",
                    "package_versions", "tuning_rows", "max_trees", "price_weighting")
+INFERENCE_VERIFICATION_VERSION = 1
 
 
 def read_json(path):
@@ -36,6 +38,86 @@ def read_json(path):
 
 def digest(path):
     return hash_file(str(path), stat_key(path))
+
+
+def inference_code_fingerprint():
+    from MODELS.Price_ML_Models import PRICE_CODE_FILES
+    code = {name: digest(ROOT / name) for name in PRICE_CODE_FILES}
+    return hashlib.sha256(json.dumps(code, sort_keys=True).encode()).hexdigest()
+
+
+@st.cache_data(max_entries=8, show_spinner=False)
+def prediction_inputs(vins, variant, expert_directory, youtube_directory, source_signature, code_fingerprint):
+    """Prepare actual VIN rows once for estimators sharing a source/feature contract."""
+    from MODELS.Price_ML_Models import prepare_prediction_frame
+    requested = pl.DataFrame({"vin": list(vins)})
+    raw = pl.scan_parquet(ROOT / "DATA/CAR_DATA_FINAL/used_cars.parquet").filter(pl.col("vin").is_in(vins)).collect()
+    raw = requested.join(raw, on="vin", how="left", validate="1:1", maintain_order="left")
+    frame = prepare_prediction_frame(variant, raw,
+        expert_feature_dir=Path(expert_directory) if expert_directory else None,
+        youtube_feature_dir=Path(youtube_directory) if youtube_directory else None)
+    if frame.height != len(vins) or frame["vin"].to_list() != list(vins):
+        raise ValueError("Prediction rows lost their listing identity/order")
+    return frame
+
+
+def verify_inference_replay(path, metadata, model, code_fingerprint):
+    """Accept changed source files only after reproducing frozen inputs and USD predictions."""
+    import joblib
+    path = Path(path)
+    required = [metadata.get(key) for key in ("shap_inputs", "shap_receipt", "shap_background")]
+    frozen_hashes = metadata.get("shap_input_sha256", {})
+    if any(not name or name not in frozen_hashes for name in required):
+        raise ValueError("Changed inference code requires verified frozen reference inputs")
+    if any(digest(path / name) != frozen_hashes[name] for name in required):
+        raise ValueError("Frozen inference reference changed")
+    predictor_path = path / model / "predictor.joblib"
+    prediction_path = path / f"{model}_test_predictions.parquet"
+    contract = {key: metadata.get(key) for key in ("model_type", "raw_feature_columns", "feature_columns",
+        "preprocessing_version", "source_file_sha256", "package_versions", "shap_input_sha256", "split_fingerprint")}
+    signature = {"version": INFERENCE_VERIFICATION_VERSION, "run": str(path.resolve()), "model": model,
+        "current_code_fingerprint": code_fingerprint, "training_code_fingerprint": metadata.get("code_fingerprint"),
+        "contract": contract, "predictor_sha256": digest(predictor_path), "test_predictions_sha256": digest(prediction_path)}
+    key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
+    receipt_path = ROOT / "MODEL_OUTPUT/diagnostics/inference_compatibility" / (key + ".json")
+    if receipt_path.is_file():
+        receipt = read_json(receipt_path)
+        if receipt.get("signature") == signature and receipt.get("status") == "passed":
+            return receipt
+    reference = pd.read_parquet(path / metadata["shap_receipt"])
+    frozen = pd.read_parquet(path / metadata["shap_inputs"])
+    if reference.empty or len(reference) != len(frozen) or reference.vin.isna().any() or reference.vin.duplicated().any():
+        raise ValueError("Frozen reference requires aligned, unique VIN rows")
+    sources = tuple((name, str(source), stat_key(source)) for name, source in price_sources(metadata).items())
+    frame = prediction_inputs(tuple(reference.vin), metadata["model_type"],
+        metadata.get("expert_features", {}).get("directory", ""),
+        metadata.get("youtube_features", {}).get("directory", ""), sources, code_fingerprint)
+    predictor = joblib.load(predictor_path)
+    raw = frame.select(metadata["raw_feature_columns"]).to_pandas()
+    prepared = predictor.named_steps["input"].transform(raw)
+    try:
+        pd.testing.assert_frame_equal(prepared.reset_index(drop=True), frozen.reset_index(drop=True),
+            check_dtype=False, check_categorical=False, rtol=1e-12, atol=1e-12)
+        saved = pl.scan_parquet(prediction_path).filter(pl.col("vin").is_in(reference.vin.tolist())).select("vin", "prediction").collect().to_pandas()
+        if saved.vin.duplicated().any() or set(saved.vin) != set(reference.vin):
+            raise ValueError("Saved predictions do not cover the unique frozen reference VINs")
+        expected = saved.set_index("vin").loc[reference.vin, "prediction"].to_numpy(float)
+        predicted = np.asarray(predictor.predict(raw), dtype=float)
+        if not np.isfinite(predicted).all() or (predicted <= 0).any():
+            raise ValueError("Frozen replay produced invalid USD predictions")
+        np.testing.assert_allclose(predicted, expected, rtol=1e-7, atol=.01)
+    except AssertionError as exc:
+        raise ValueError("Current inference does not reproduce the frozen training inputs/predictions") from exc
+    if inference_code_fingerprint() != code_fingerprint or digest(predictor_path) != signature["predictor_sha256"]:
+        raise ValueError("Inference inputs changed during verification")
+    receipt = {"status": "passed", "signature": signature, "rows": len(reference),
+               "maximum_absolute_usd_difference": float(np.max(np.abs(predicted - expected))),
+               "comparison": "all frozen test inputs and VIN-aligned saved USD predictions; rtol=1e-7, atol=$0.01"}
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = receipt_path.with_suffix("." + uuid4().hex + ".tmp")
+    temporary.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    temporary.replace(receipt_path)
+    return receipt
 
 
 def compatibility_group(metadata):
@@ -70,6 +152,10 @@ def latest_inventory(base=ROOT / "MODEL_OUTPUT"):
         if full:
             path, metadata = full
             try:
+                from MODELS import Price_ML_Models as price
+                if (variant in price.YOUTUBE_MODEL_TYPES
+                        and metadata.get("raw_feature_columns") != list(price.MODEL_FEATURE_SETS[variant])):
+                    raise ValueError("Retired YouTube feature definition; retrain with sentiment v2")
                 group = compatibility_group(metadata)
                 metrics = pd.read_csv(path / "validation_metrics.csv")
                 test = pd.read_csv(path / "metrics.csv") if (path / "metrics.csv").is_file() else pd.DataFrame()
@@ -118,11 +204,7 @@ def validate_price_run(path, model=None):
         raise ValueError("Preprocessing version differs")
     if list(metadata.get("raw_feature_columns", [])) != list(price.MODEL_FEATURE_SETS[variant]):
         raise ValueError("Raw feature definition/order differs")
-    code = {name: digest(ROOT / name) for name in (
-        "MODELS/Price_ML_Models.py", "EDA/DATA_CLEANING.py", "NHTSA/text_features.py", "EXPERT_REVIEWS/price_features.py")}
-    fingerprint = hashlib.sha256(json.dumps(code, sort_keys=True).encode()).hexdigest()
-    if fingerprint != metadata.get("code_fingerprint"):
-        raise ValueError("Inference helper code differs from the training receipt")
+    fingerprint = inference_code_fingerprint()
     for package, version in metadata.get("package_versions", {}).items():
         if importlib.metadata.version(package) != version:
             raise ValueError(f"Package differs: {package}")
@@ -132,6 +214,10 @@ def validate_price_run(path, model=None):
             raise ValueError(f"Source changed: {name}")
     if hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest() != metadata.get("dataset_fingerprint"):
         raise ValueError("Dataset fingerprint differs")
+    if fingerprint != metadata.get("code_fingerprint"):
+        if model is None or metadata.get("models", {}).get(model, {}).get("status") != "completed":
+            raise ValueError("Changed inference code requires a completed estimator for frozen replay")
+        verify_inference_replay(path, metadata, model, fingerprint)
     return metadata
 
 
@@ -146,17 +232,36 @@ def price_sources(metadata):
         elif name in COMMON_SOURCES:
             source = ROOT / "DATA/CAR_DATA_FINAL" / name
         else:
-            source = ROOT / "YOUTUBE/outputs/price_features_v1" / name
+            from NHTSA.text_features import load_youtube_features
+
+            directory = metadata.get("youtube_features", {}).get("directory")
+            if not directory:
+                raise ValueError("YouTube source directory missing from receipt; retrain with sentiment v2")
+            load_youtube_features(directory)
+            source = Path(directory) / name
         paths[name] = source
     return paths
 
 
 def registry():
-    return read_json(CONFIG)
+    config = read_json(CONFIG)
+    if config.get("price_run_selection") is not None:
+        from car_app.artifacts import diagnostic_inventory
+
+        _, candidates, _, _ = diagnostic_inventory(config["price_run_selection"])
+        config["active_price"] = None
+        if not candidates.empty:
+            choice = candidates.sort_values(["validation_mae", "feature_set", "model"]).iloc[0]
+            path = ROOT / "MODEL_OUTPUT" / choice.run
+            config["active_price"] = {"run": choice.run, "model": choice.model,
+                "metadata_sha256": digest(path / "run_metadata.json"),
+                "predictor_sha256": digest(path / choice.model / "predictor.joblib"),
+                "selection_metric": "validation_mae_usd"}
+    return config
 
 
 @st.cache_resource(max_entries=2, show_spinner=False)
-def load_predictor(run, model, metadata_hash, predictor_hash, source_signature=()):
+def load_predictor(run, model, metadata_hash, predictor_hash, source_signature=(), code_fingerprint=""):
     import joblib
     path = ROOT / "MODEL_OUTPUT" / run
     if digest(path / "run_metadata.json") != metadata_hash:
@@ -184,19 +289,14 @@ def price_estimates(listings: pl.DataFrame, config=None):
     if not active or listings.is_empty():
         return listings, "No price model is activated."
     try:
-        from MODELS.Price_ML_Models import prepare_prediction_frame, MODEL_FEATURE_SETS
+        from MODELS.Price_ML_Models import MODEL_FEATURE_SETS
         receipt = read_json(ROOT / "MODEL_OUTPUT" / active["run"] / "run_metadata.json")
         source_signature = tuple((name, stat_key(path)) for name, path in price_sources(receipt).items())
-        predictor, metadata = load_predictor(active["run"], active["model"], active["metadata_sha256"], active["predictor_sha256"], source_signature)
-        # Use raw source rows, not imputed or displayed cohort summaries.
-        raw = pl.scan_parquet(ROOT / "DATA/CAR_DATA_FINAL/used_cars.parquet").filter(
-            pl.col("vin").is_in(listings["vin"].to_list())).collect()
-        raw = listings.select("vin").join(raw, on="vin", how="left", validate="1:1", maintain_order="left")
-        expert_directory = metadata.get("expert_features", {}).get("directory")
-        frame = prepare_prediction_frame(metadata["model_type"], raw,
-                                         expert_feature_dir=Path(expert_directory) if expert_directory else None)
-        if frame.height != listings.height or frame["vin"].to_list() != listings["vin"].to_list():
-            raise ValueError("Prediction rows lost their listing identity/order")
+        code_fingerprint = inference_code_fingerprint()
+        predictor, metadata = load_predictor(active["run"], active["model"], active["metadata_sha256"], active["predictor_sha256"], source_signature, code_fingerprint)
+        frame = prediction_inputs(tuple(listings["vin"].to_list()), metadata["model_type"],
+            metadata.get("expert_features", {}).get("directory", ""),
+            metadata.get("youtube_features", {}).get("directory", ""), source_signature, code_fingerprint)
         values = np.asarray(predictor.predict(frame.select(MODEL_FEATURE_SETS[metadata["model_type"]]).to_pandas()))
         if len(values) != listings.height or not np.isfinite(values).all() or (values <= 0).any():
             raise ValueError("Invalid USD predictions")

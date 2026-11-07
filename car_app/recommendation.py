@@ -68,7 +68,10 @@ def cluster_population(catalog, profiles, fold, view, method):
     return rows
 
 
-def search_candidates(source: Snapshot, requirements, revision, sort_by="Observed price", catalog=None):
+def search_candidates(source: Snapshot, requirements, revision, sort_by="Observed price", catalog=None, return_population=False,
+                      listing_limit=10, cohort_limit=5, distinct_families=False):
+    if not 1 <= listing_limit <= 30 or not 1 <= cohort_limit <= 10:
+        raise ValueError("Search limits exceed the supported shortlist")
     if requirements.get("snapshot_identity") != source.identity or requirements.get("revision") != revision:
         raise ValueError("Requirements are stale; review and submit them again")
     if sort_by not in SORTS:
@@ -139,16 +142,18 @@ def search_candidates(source: Snapshot, requirements, revision, sort_by="Observe
         exclusions.append({"requirement": label, "excluded_at_step": previous - remaining, "remaining": remaining})
         previous = remaining
     eligible = frame.filter(cumulative)
+    if return_population:
+        return eligible
     column, descending = SORTS[sort_by]
     order = [column, "price", "listing_id", "vin"] if column != "price" else ["price", "listing_id", "vin"]
     directions = [descending] + [False] * (len(order) - 1)
     if preferences:
         order, directions = ["category_match", *order], [True, *directions]
     ordered = eligible.sort(order, descending=directions, nulls_last=True)
-    leaders = ordered.unique(subset=COHORT[:3], keep="first", maintain_order=True).head(10).collect()
+    leaders = ordered.unique(subset=COHORT[1:3] if distinct_families else COHORT[:3], keep="first", maintain_order=True).head(listing_limit).collect()
     selected = leaders
-    if selected.height < 10:
-        rest = ordered.filter(~pl.col("vin").is_in(selected["vin"].to_list())).head(10-selected.height).collect()
+    if selected.height < listing_limit and not distinct_families:
+        rest = ordered.filter(~pl.col("vin").is_in(selected["vin"].to_list())).head(listing_limit-selected.height).collect()
         selected = pl.concat([selected, rest])
     if preferences:
         selected = selected.sort(order, descending=directions, nulls_last=True)
@@ -161,9 +166,9 @@ def search_candidates(source: Snapshot, requirements, revision, sort_by="Observe
         *([pl.col("category_match").mean().alias("category_match")] if preferences else []))
     summary = summary.sort((["category_match"] if preferences else []) + ["sort_value", *COHORT],
         descending=([True] if preferences else []) + [descending, False, False, False, False], nulls_last=True)
-    cohorts = summary.unique(subset=COHORT[:3], keep="first", maintain_order=True).head(5).collect()
-    if cohorts.height < 5:
-        remaining = summary.join(cohorts.select(COHORT).lazy(), on=COHORT, how="anti").head(5-cohorts.height).collect()
+    cohorts = summary.unique(subset=COHORT[:3], keep="first", maintain_order=True).head(cohort_limit).collect()
+    if cohorts.height < cohort_limit:
+        remaining = summary.join(cohorts.select(COHORT).lazy(), on=COHORT, how="anti").head(cohort_limit-cohorts.height).collect()
         cohorts = pl.concat([cohorts, remaining])
     cohorts = cohorts.with_columns((pl.col("qualifying_listings") < 5).alias("low_support"))
     if preferences:
@@ -445,7 +450,7 @@ def _choice(label, options, key, default=None, format_func=str):
     return st.selectbox(label, options, index=options.index(default) if default in options else 0, key=key, format_func=format_func)
 
 
-def cluster_explorer(catalog, profiles, key="clusters", reference_id=None, preferred_view=None, color_dimension="market_positioning"):
+def cluster_explorer(catalog, profiles, key="clusters", reference_id=None, preferred_view=None, color_dimension="market_positioning", compact=False):
     st.subheader("Filtered specification clusters")
     if profiles.empty:
         st.info("No saved profiles match these filters.")
@@ -520,13 +525,49 @@ def cluster_explorer(catalog, profiles, key="clusters", reference_id=None, prefe
     else:
         st.info("Not enough observed numeric specifications for a two-axis diagram in this selection.")
     with st.expander("Filtered profile values and fitted model checks"):
-        columns = [*COHORT, "category_summary", "body_style", "powertrain", "matching_listings", "filtered_median_price", "filtered_median_mileage", "cluster_label", "cluster_context", "profile_id"]
-        st.dataframe(rows[[c for c in columns if c in rows]].head(1000), hide_index=True, width="stretch", alt="Filtered VIN-supported profile values and cluster context")
-        checks = catalog.experiments[catalog.experiments.fold.eq(fold) & catalog.experiments.view.eq(view)]
-        st.dataframe(checks, hide_index=True, width="stretch", alt="Saved support and stability checks for the selected fitted context")
+        detail = "Both" if not compact else None
+        if compact and st.checkbox("Show diagnostic table", key=key + "_details"):
+            detail = st.selectbox("Diagnostic table", ["Profiles", "Model checks"], key=key + "_detail_kind")
+        if detail in ("Profiles", "Both"):
+            columns = [*COHORT, "category_summary", "body_style", "powertrain", "matching_listings", "filtered_median_price", "filtered_median_mileage", "cluster_label", "cluster_context", "profile_id"]
+            st.dataframe(rows[[c for c in columns if c in rows]].head(1000), hide_index=True, width="stretch", alt="Filtered VIN-supported profile values and cluster context")
+        if detail in ("Model checks", "Both"):
+            checks = catalog.experiments[catalog.experiments.fold.eq(fold) & catalog.experiments.view.eq(view)]
+            st.dataframe(checks, hide_index=True, width="stretch", alt="Saved support and stability checks for the selected fitted context")
 
 
 def category_explorer(catalog, key="categories", profiles=None, reference_id=None):
+    """Compact default; keep the previous research presentation explicitly available."""
+    if catalog is None:
+        st.info("Saved vehicle profiles are unavailable.")
+        return
+    identity = str(catalog.path) + str(catalog.manifest.get("completed_at")) + str(catalog.hierarchy_receipt)
+    if st.session_state.get(key + "_compact_artifact") != identity:
+        for suffix in ("_compact_clusters_color", "_compact_body"):
+            st.session_state.pop(key + suffix, None)
+        st.session_state[key + "_compact_artifact"] = identity
+    base = catalog.profiles if profiles is None else profiles
+    if base.empty:
+        st.info("No profiles match the selected filters.")
+        return
+    st.subheader("Vehicle categories")
+    body = "body_style" if "body_style" in base else "body_family"
+    choices = sorted(base[body].dropna().astype(str).unique()) if body in base else []
+    if choices:
+        selected = st.selectbox("Body category", choices, key=key + "_compact_body")
+        base = base.loc[base[body].eq(selected)]
+    count = "matching_listings" if "matching_listings" in base else "vin_count"
+    with st.container(horizontal=True):
+        st.metric("Matching listings", f"{int(base[count].sum()):,}")
+        st.metric("Profiles", len(base))
+        st.metric("Supported profiles", int(base.get("eligible", pd.Series(False, index=base.index)).sum()))
+    cluster_explorer(catalog, base, key + "_compact_clusters", reference_id=reference_id, compact=True)
+    with st.expander("Research details"):
+        if st.checkbox("Show full category research view", key=key + "_research"):
+            _research_category_explorer(catalog, key + "_research_view", profiles=base, reference_id=reference_id)
+
+
+def _research_category_explorer(catalog, key="categories", profiles=None, reference_id=None):
     st.subheader("Vehicle categories")
     if catalog is None or not catalog.category_choices():
         st.info("Activate a completed v4 or v5 run to explore vehicle categories. The existing similarity view remains available.")

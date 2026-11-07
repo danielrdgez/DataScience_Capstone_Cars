@@ -36,7 +36,9 @@ from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin
 from sklearn.exceptions import NotFittedError
 from sklearn.impute import SimpleImputer
 from sklearn.utils.validation import check_is_fitted
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_absolute_error, r2_score
+
+
 class PricePreprocessor(TransformerMixin, BaseEstimator):
     """Keep unknown categories and numeric missingness explicit at inference.
 
@@ -87,6 +89,84 @@ class PricePreprocessor(TransformerMixin, BaseEstimator):
     def get_feature_names_out(self, input_features=None):
         check_is_fitted(self, "output_columns_")
         return np.asarray(self.output_columns_, dtype=object)
+
+
+class ShardedLightGBMRegressor(RegressorMixin, BaseEstimator):
+    """Keep large Windows ensembles out of LightGBM's whole-model text loader."""
+
+    def __init__(self, booster=None):
+        self.booster = booster
+
+    def predict(self, x, **kwargs):
+        boosters = [self.booster] if self.booster is not None else self.shards_
+        result = None
+        for booster in boosters:
+            values = booster.predict(x, num_threads=1, **kwargs)
+            result = values if result is None else result + values
+        return result
+
+    def __getstate__(self):
+        if self.booster is None:
+            return {"texts": [booster.model_to_string(num_iteration=-1) for booster in self.shards_]}
+        texts = []
+        total = self.booster.current_iteration()
+        for start in range(0, total, 100):
+            text = self.booster.model_to_string(start_iteration=start, num_iteration=100)
+            _validate_lightgbm_shard(text)
+            texts.append(text)
+            if start % 1000 == 0 or start + 100 >= total:
+                logging.getLogger(__name__).info("Serialized LightGBM trees %s/%s in bounded groups",
+                                                  min(start + 100, total), total)
+        return {"texts": texts}
+
+    def __setstate__(self, state):
+        import lightgbm as lgb
+        self.booster = None
+        self.shards_ = []
+        for text in state["texts"]:
+            _validate_lightgbm_shard(text)
+            self.shards_.append(lgb.Booster(model_str=text))
+
+
+def _validate_lightgbm_shard(text):
+    """Check native tree offsets before passing model text to the C++ parser."""
+    import re
+    raw = text.encode("utf-8")
+    if len(raw) > 128 * 1024 * 1024 or b"\x00" in raw:
+        raise ValueError("Unsafe LightGBM shard size or embedded null")
+    match = re.search(rb"(?m)^tree_sizes=([^\n]+)\n", raw)
+    starts = [m.start() for m in re.finditer(rb"(?m)^Tree=\d+\n", raw)]
+    end = raw.find(b"end of trees\n")
+    if not match or not starts or end < 0:
+        raise ValueError("Incomplete LightGBM shard")
+    sizes = [int(value) for value in match[1].split()]
+    boundaries = starts + [end]
+    if len(sizes) != len(starts) or sizes != [b - a for a, b in zip(boundaries, boundaries[1:])]:
+        raise ValueError("LightGBM tree offsets do not match serialized data")
+
+
+def _fit_lightgbm_full(x, y, categorical_columns, iterations, parameters, weights, checkpoint_path):
+    """Native fitting skips sklearn's implicit whole-model serialize/reload."""
+    import lightgbm as lgb
+    params = _make_tree_model("lightgbm", iterations, parameters=parameters, device="cpu").get_params()
+    for key in ("n_estimators", "importance_type", "class_weight"):
+        params.pop(key, None)
+    params["metric"] = "None"
+    logger = logging.getLogger(__name__)
+
+    def progress(env):
+        completed = env.iteration + 1
+        if completed == 1 or completed % 100 == 0 or completed == iterations:
+            logger.info("LightGBM %s: built %s/%s trees", checkpoint_path.stem, completed, iterations)
+            _write_json_checkpoint(checkpoint_path, {"completed_iterations": completed,
+                "requested_iterations": iterations, "phase": "tree_building"})
+
+    dataset = lgb.Dataset(x, label=y, weight=weights, categorical_feature=categorical_columns)
+    booster = lgb.train(params, dataset, num_boost_round=iterations,
+                        keep_training_booster=True, callbacks=[progress])
+    logger.info("LightGBM tree building finished; releasing training dataset without model-text reload")
+    booster.free_dataset()
+    return ShardedLightGBMRegressor(booster)
 
 
 class ExpLogPricePredictor(RegressorMixin, BaseEstimator):
@@ -158,6 +238,7 @@ class FixedNumericPCA(TransformerMixin, BaseEstimator):
 # import path that resolves to this same module in both CLI and notebook use.
 sys.modules.setdefault("MODELS.Price_ML_Models", sys.modules[__name__])
 PricePreprocessor.__module__ = "MODELS.Price_ML_Models"
+ShardedLightGBMRegressor.__module__ = "MODELS.Price_ML_Models"
 ExpLogPricePredictor.__module__ = "MODELS.Price_ML_Models"
 FixedNumericPCA.__module__ = "MODELS.Price_ML_Models"
 
@@ -380,6 +461,10 @@ SEARCH_N_JOBS = 1  # Keep parallel model copies from increasing peak memory.
 TARGET_COLUMN = "price"
 COHORT_COLUMNS = ("ModelYear", "Make", "Model", "Trim")
 PREPROCESSING_VERSION = "advertised-price-log-v4"
+PRICE_CODE_FILES = (
+    "MODELS/Price_ML_Models.py", "EDA/DATA_CLEANING.py", "NHTSA/text_features.py",
+    "EXPERT_REVIEWS/price_features.py", "YOUTUBE/text/sentiment.py",
+)
 OPTION_LABELS = {
     "option_navigation": "Navigation System", "option_leather": "Leather Seats",
     "option_heated_seats": "Heated Seats", "option_backup_camera": "Backup Camera",
@@ -387,34 +472,34 @@ OPTION_LABELS = {
     "option_remote_start": "Remote Start", "option_alloy_wheels": "Alloy Wheels",
     "option_adaptive_cruise": "Adaptive Cruise Control",
 }
-DERIVED_FEATURE_COLUMNS = ("maximum_seating_numeric", "log1p_mileage", *OPTION_LABELS)
+DERIVED_FEATURE_COLUMNS = ("log1p_mileage", *OPTION_LABELS)
 
 BASE_FEATURE_COLUMNS = (
-    "engine_displacement", "engine_type", "exterior_color", "fuel_type",
-    "horsepower", "interior_color", "is_new", "listing_color", "make_name",
-    "mileage", "model_name", "owner_count", "transmission", "trim_name",
+    "engine_type", "exterior_color",
+    "horsepower", "interior_color", "is_new", "make_name",
+    "model_name", "owner_count", "transmission", "trim_name",
     "wheel_system", "wheelbase", "width", "year",
     "has_accidents", "frame_damaged", "salvage", "fleet", "theft_title",
-    "latitude", "longitude", "body_type", "city_fuel_economy", "highway_fuel_economy",
+    "latitude", "longitude", "city_fuel_economy",
 ) + DERIVED_FEATURE_COLUMNS
 
 VPIC_FEATURE_COLUMNS = (
     "ABS", "AirBagLocCurtain", "AirBagLocFront", "AirBagLocSide",
-    "AutoReverseSystem", "Axles", "BlindSpotMon", "BodyClass",
-    "BrakeSystemType", "CoolingType", "DaytimeRunningLight", "DisplacementL",
-    "Doors", "DynamicBrakeSupport", "ESC", "EngineConfiguration", "EngineCycles",
-    "EngineCylinders", "EngineManufacturer", "FuelTypePrimary",
+    "AutoReverseSystem", "BlindSpotMon", "BodyClass",
+    "DaytimeRunningLight", "DisplacementL",
+    "Doors", "DynamicBrakeSupport", "EngineConfiguration", "EngineCycles",
+    "EngineManufacturer", "FuelTypePrimary",
     "ForwardCollisionWarning", "FuelInjectionType", "FuelTypeSecondary",
     "KeylessIgnition", "LaneCenteringAssistance", "LaneDepartureWarning",
     "LaneKeepSystem", "ParkAssist", "PedestrianAutomaticEmergencyBraking",
-    "RearCrossTrafficAlert", "RearVisibilitySystem", "SeatRows", "Seats",
+    "RearCrossTrafficAlert", "RearVisibilitySystem", "Seats",
     "TPMS", "TopSpeedMPH", "TransmissionSpeeds", "Turbo", "WheelSizeFront",
-    "WheelSizeRear", "Wheels", "Windows",
+    "Wheels", "Windows",
 )
 
 COMPLAINT_VALUE_FEATURES = (
     "complaint_count", "crash_report_count", "fire_report_count",
-    "injury_report_count", "death_report_count", "reported_injuries",
+    "death_report_count", "reported_injuries",
     "reported_deaths", "component_count",
 )
 RECALL_VALUE_FEATURES = ("recall_campaign_count",)
@@ -444,10 +529,13 @@ ENRICHED_FEATURE_COLUMNS = tuple(dict.fromkeys(
 ENHANCED_FEATURE_COLUMNS = tuple(dict.fromkeys(
     BASE_FEATURE_COLUMNS + VPIC_FEATURE_COLUMNS + TRUCK_FEATURE_COLUMNS + EV_HEV_FEATURE_COLUMNS
 ))
-YOUTUBE_FEATURE_DIRECTORY = PROJECT_ROOT / "YOUTUBE/outputs/price_features_v1"
+from YOUTUBE.text.sentiment import (
+    DEFAULT_PRICE_FEATURE_DIRECTORY as YOUTUBE_FEATURE_DIRECTORY,
+    EXTRA_FEATURE_COLUMNS as YOUTUBE_SENTIMENT_EXTRA_COLUMNS,
+)
 YOUTUBE_ASPECTS = ("design", "performance", "comfort", "technology", "reliability",
                    "maintenance_cost", "fuel_economy_range", "safety")
-YOUTUBE_FEATURE_COLUMNS = (
+YOUTUBE_EXPORT_FEATURE_COLUMNS = (
     "yt_feature_row_present", "yt_comment_count", "yt_eligible_count", "yt_video_count",
     "yt_support_suppressed", "yt_semantic_missing",
     *[f"yt_{a}_topic_missing" for a in YOUTUBE_ASPECTS],
@@ -455,29 +543,53 @@ YOUTUBE_FEATURE_COLUMNS = (
     *[f"yt_{a}_mention_share" for a in YOUTUBE_ASPECTS],
     *[f"yt_{a}_{suffix}" for a in ("comfort", "maintenance_cost", "performance", "reliability")
       for suffix in ("video_balanced_net", "opinion_count", "opinion_video_count", "missing")],
-)
+) + YOUTUBE_SENTIMENT_EXTRA_COLUMNS
+EXCLUDED_YOUTUBE_FEATURE_COLUMNS = frozenset({
+    "yt_support_suppressed", "yt_semantic_missing", "yt_overall_missing",
+    *[f"yt_{a}_topic_missing" for a in YOUTUBE_ASPECTS],
+    "yt_performance_video_balanced_net",
+    *[f"yt_performance_{suffix}" for suffix in (
+        "video_balanced_soft_net", "mean_confidence", "mean_margin",
+        "mean_entropy", "low_confidence_share")],
+    # Selected after the full-feature multicollinearity audit; exports stay intact.
+    "yt_feature_row_present", "yt_performance_missing",
+    "yt_overall_video_balanced_soft_net", "yt_overall_mean_confidence",
+    "yt_overall_mean_margin", "yt_overall_low_confidence_share",
+    "yt_reliability_mean_confidence", "yt_reliability_mean_margin",
+    *[f"yt_{aspect}_{suffix}" for aspect in ("comfort", "maintenance_cost")
+      for suffix in ("video_balanced_soft_net", "mean_confidence", "mean_margin",
+                     "mean_entropy", "low_confidence_share")],
+})
+# Preserve the validated source export; select predictors independently.
+YOUTUBE_LOG_COUNT_COLUMNS = {
+    "yt_overall_opinion_count": "yt_overall_log1p_opinion_count",
+    "yt_overall_opinion_video_count": "yt_overall_log1p_opinion_video_count",
+}
+YOUTUBE_FEATURE_COLUMNS = tuple(YOUTUBE_LOG_COUNT_COLUMNS.get(c, c) for c in YOUTUBE_EXPORT_FEATURE_COLUMNS
+                                if c not in EXCLUDED_YOUTUBE_FEATURE_COLUMNS)
+YOUTUBE_SENTIMENT_FEATURE_COLUMNS = YOUTUBE_FEATURE_COLUMNS
 PCR_COMPONENTS = 31
 PCR_PROTOCOL_VERSION = "full-numeric-pca31-v1"
 PCR_FLAG_COLUMNS = frozenset(OPTION_LABELS) | frozenset({
     "complaint_source_records_present", "recall_source_records_present",
-    "yt_feature_row_present", "yt_support_suppressed", "yt_semantic_missing",
-    "doug_cohort_match_available", "doug_make_baseline_available",
-    *[f"yt_{a}_topic_missing" for a in YOUTUBE_ASPECTS],
-    *[f"yt_{a}_missing" for a in ("comfort", "maintenance_cost", "performance", "reliability")],
+    *[f"yt_{a}_missing" for a in ("comfort", "maintenance_cost", "reliability")],
 })
 from EXPERT_REVIEWS.price_features import (
-    DEFAULT_DIRECTORY as EXPERT_FEATURE_DIRECTORY, FEATURE_COLUMNS as EXPERT_FEATURE_COLUMNS,
-    COVERAGE_COLUMNS as EXPERT_COVERAGE_COLUMNS, load_features as load_expert_features,
+    DEFAULT_DIRECTORY as EXPERT_FEATURE_DIRECTORY, SCORE_COLUMNS as EXPERT_SCORE_COLUMNS,
+    load_features as load_expert_features,
     join_features as join_expert_features,
 )
+EXPERT_COVERAGE_COLUMNS = ("doug_source_level", "doug_model_count")
+EXPERT_FEATURE_COLUMNS = tuple(c for c in EXPERT_SCORE_COLUMNS if c != "doug_cool_factor") + EXPERT_COVERAGE_COLUMNS
 
-YOUTUBE_MODEL_TYPES = {"full", "full_youtube", "full_youtube_expert_coverage"}
+YOUTUBE_MODEL_TYPES = {"full", "full_youtube", "full_youtube_expert_coverage", "full_youtube_sentiment"}
 EXPERT_MODEL_TYPES = {"full", "enhanced_safety_expert", "enhanced_safety_expert_coverage", "full_youtube_expert_coverage"}
 MODEL_FEATURE_SETS = {
     "base": BASE_FEATURE_COLUMNS,
     "enhanced": ENHANCED_FEATURE_COLUMNS,
     "enhanced_safety": ENRICHED_FEATURE_COLUMNS,
     "full_youtube": ENRICHED_FEATURE_COLUMNS + YOUTUBE_FEATURE_COLUMNS,
+    "full_youtube_sentiment": ENRICHED_FEATURE_COLUMNS + YOUTUBE_SENTIMENT_FEATURE_COLUMNS,
     "enhanced_safety_expert": ENRICHED_FEATURE_COLUMNS + EXPERT_FEATURE_COLUMNS,
     "enhanced_safety_expert_coverage": ENRICHED_FEATURE_COLUMNS + EXPERT_COVERAGE_COLUMNS,
     "full_youtube_expert_coverage": ENRICHED_FEATURE_COLUMNS + YOUTUBE_FEATURE_COLUMNS + EXPERT_COVERAGE_COLUMNS,
@@ -993,9 +1105,9 @@ def _validate_snapshot_columns(model_type: str) -> tuple[list[str], list[str]]:
                if column not in listing_schema and column not in vpic_schema
                and column not in DERIVED_FEATURE_COLUMNS
                and column not in COMPLAINT_RECALL_FEATURE_COLUMNS
-               and column not in YOUTUBE_FEATURE_COLUMNS
+               and column not in YOUTUBE_SENTIMENT_FEATURE_COLUMNS
                and column not in EXPERT_FEATURE_COLUMNS]
-    missing += [c for c in ("major_options", "maximum_seating") if c not in listing_schema]
+    missing += [c for c in ("major_options", "maximum_seating", "mileage") if c not in listing_schema]
     if missing:
         raise ValueError(
             "Requested predictors absent from the saved Parquet schemas: "
@@ -1085,7 +1197,7 @@ def _normalize_model_feature_strings(frame: pl.DataFrame,
 
 def load_model_frame(
     model_type: str, sample_size: int | None, *, issue_as_of: date | None = None,
-    expert_feature_dir: Path | None = None,
+    expert_feature_dir: Path | None = None, youtube_feature_dir: Path | None = None,
 ) -> tuple[pl.DataFrame, dict[str, Any]]:
     """Load only requested columns, VIN-join listings/vPIC, and optionally sample."""
     if model_type not in MODEL_FEATURE_SETS:
@@ -1097,7 +1209,7 @@ def load_model_frame(
     listing_features, vpic_features = _validate_snapshot_columns(model_type)
     features = list(MODEL_FEATURE_SETS[model_type])
     listing_columns = list(dict.fromkeys([
-        "vin", TARGET_COLUMN, *listing_features, "maximum_seating", "major_options",
+        "vin", TARGET_COLUMN, *listing_features, "maximum_seating", "major_options", "mileage",
     ]))
     vpic_columns = list(dict.fromkeys([
         "vin", *vpic_features, *COHORT_COLUMNS, *SUBTYPE_SUPPORT_COLUMNS,
@@ -1160,8 +1272,10 @@ def load_model_frame(
     youtube_info = None
     if model_type in YOUTUBE_MODEL_TYPES:
         from NHTSA.text_features import load_youtube_features, join_youtube_features
-        youtube_frame, youtube_info = load_youtube_features(YOUTUBE_FEATURE_DIRECTORY)
-        if set(youtube_frame.columns) != {"Make", *YOUTUBE_FEATURE_COLUMNS}:
+        youtube_frame, youtube_info = load_youtube_features(youtube_feature_dir or YOUTUBE_FEATURE_DIRECTORY)
+        youtube_info['directory'] = str(Path(youtube_feature_dir or YOUTUBE_FEATURE_DIRECTORY).resolve())
+        expected = YOUTUBE_EXPORT_FEATURE_COLUMNS
+        if set(youtube_frame.columns) != {"Make", *expected}:
             raise ValueError("Selected YouTube schema differs from the full variant")
         frame = join_youtube_features(frame, youtube_frame)
     expert_info = None
@@ -1193,7 +1307,7 @@ def load_model_frame(
         ((pl.col("price") < 500) | (pl.col("price") > 500_000))
         .fill_null(False).alias("price_review_flag"),
     )
-    selected = list(dict.fromkeys([*features, *COHORT_COLUMNS, TARGET_COLUMN, "_cohort_group", "vin", "cohort_complete",
+    selected = list(dict.fromkeys([*features, *COHORT_COLUMNS, TARGET_COLUMN, "mileage", "_cohort_group", "vin", "cohort_complete",
                 "split_identity_source", "mileage_review_flag", "price_review_flag"]))
     if expert_info:
         selected = list(dict.fromkeys([*selected, *EXPERT_COVERAGE_COLUMNS]))
@@ -1234,7 +1348,8 @@ def load_model_frame(
 
 
 def prepare_prediction_frame(model_type: str, listings: pl.DataFrame, *,
-                             expert_feature_dir: Path | None = None) -> pl.DataFrame:
+                             expert_feature_dir: Path | None = None,
+                             youtube_feature_dir: Path | None = None) -> pl.DataFrame:
     """Assemble model inputs from listing rows without requiring a price label.
 
     Rows join to the saved vPIC snapshot on lowercase ``vin``. Missing source
@@ -1252,7 +1367,7 @@ def prepare_prediction_frame(model_type: str, listings: pl.DataFrame, *,
     listing_schema = scan_final_table("used_cars").collect_schema()
     model_features = list(MODEL_FEATURE_SETS[model_type])
     listing_columns = list(dict.fromkeys([
-        "vin", *listing_features, "maximum_seating", "major_options",
+        "vin", *listing_features, "maximum_seating", "major_options", "mileage",
     ]))
     available_columns = [column for column in listing_columns if column in listings.columns]
     frame = clean_used_cars_batch(listings.select(available_columns))
@@ -1294,7 +1409,10 @@ def prepare_prediction_frame(model_type: str, listings: pl.DataFrame, *,
 
     if model_type in YOUTUBE_MODEL_TYPES:
         from NHTSA.text_features import load_youtube_features, join_youtube_features
-        youtube_frame, _ = load_youtube_features(YOUTUBE_FEATURE_DIRECTORY)
+        youtube_frame, _ = load_youtube_features(youtube_feature_dir or YOUTUBE_FEATURE_DIRECTORY)
+        expected = YOUTUBE_EXPORT_FEATURE_COLUMNS
+        if set(youtube_frame.columns) != {"Make", *expected}:
+            raise ValueError('Selected YouTube schema differs from the predictor variant')
         frame = join_youtube_features(frame, youtube_frame)
     if model_type in EXPERT_MODEL_TYPES:
         from EDA.DATA_CLEANING import FINAL_DATASET_PATH
@@ -1309,7 +1427,8 @@ def prepare_prediction_frame(model_type: str, listings: pl.DataFrame, *,
 
 
 def predict_listings(model_type: str, predictor_path: Path,
-                     listings: pl.DataFrame, *, expert_feature_dir: Path | None = None) -> pl.DataFrame:
+                     listings: pl.DataFrame, *, expert_feature_dir: Path | None = None,
+                     youtube_feature_dir: Path | None = None) -> pl.DataFrame:
     """Score listing rows and return VIN, decoded identity, scope, and USD price."""
     import joblib
 
@@ -1320,7 +1439,7 @@ def predict_listings(model_type: str, predictor_path: Path,
         saved_features = [*preprocessor.categorical_columns, *preprocessor.numeric_columns]
     if saved_features is not None and set(saved_features) != set(MODEL_FEATURE_SETS[model_type]):
         raise ValueError("Saved predictor feature definition differs from the requested variant; "
-                         "use full_youtube for legacy full predictors or retrain full with expert features")
+                         "retrain the requested variant with the current feature selection")
     if model_type in EXPERT_MODEL_TYPES:
         saved = getattr(predictor, "expert_feature_info_", None)
         if not saved:
@@ -1329,7 +1448,18 @@ def predict_listings(model_type: str, predictor_path: Path,
         _, _, current = load_expert_features(expert_feature_dir)
         if current["manifest_sha256"] != saved["manifest_sha256"]:
             raise ValueError("DougScore snapshot differs from the fitted predictor; use its saved expert directory")
-    frame = prepare_prediction_frame(model_type, listings, expert_feature_dir=expert_feature_dir)
+    if model_type in YOUTUBE_MODEL_TYPES:
+        saved = getattr(predictor, 'youtube_feature_info_', None)
+        if not saved:
+            raise ValueError('Sentiment predictor lacks YouTube provenance; retrain this variant')
+        if saved:
+            from NHTSA.text_features import load_youtube_features
+            youtube_feature_dir = youtube_feature_dir or Path(saved['directory'])
+            _, current = load_youtube_features(youtube_feature_dir)
+            if current['manifest_sha256'] != saved['manifest_sha256']:
+                raise ValueError('YouTube snapshot differs from the fitted predictor')
+    frame = prepare_prediction_frame(model_type, listings, expert_feature_dir=expert_feature_dir,
+                                     youtube_feature_dir=youtube_feature_dir)
     predictions = predictor.predict(frame.select(MODEL_FEATURE_SETS[model_type]).to_pandas())
     return frame.select(["vin", *COHORT_COLUMNS, "is_new"]).with_columns(
         pl.Series("predicted_price_usd", predictions)
@@ -1538,10 +1668,12 @@ def _make_tree_model(
             objective="regression_l1", n_estimators=iterations,
             learning_rate=parameters.get("learning_rate", 0.05),
             num_leaves=parameters.get("num_leaves", 31), max_depth=-1,
-            min_child_samples=parameters.get("min_child_samples", 100), n_jobs=TREE_THREADS,
+            min_child_samples=parameters.get("min_child_samples", 100),
+            n_jobs=1 if device == "cpu" else TREE_THREADS,
             random_state=RANDOM_SEED, verbosity=-1,
             **({"device_type": "gpu", "gpu_device_id": 0, "max_bin": 63}
-               if device == "gpu" else {"device_type": "cpu"}),
+               if device == "gpu" else {"device_type": "cpu", "force_col_wise": True,
+                                       "histogram_pool_size": 512}),
             **extra_parameters,
         )
     if name == "xgboost":
@@ -1926,9 +2058,11 @@ def run_price_model_pilot(
     split_strategy: str = "cohort_stratified",
     price_weighting: str = "none",
     expert_feature_dir: Path | None = None,
+    youtube_feature_dir: Path | None = None,
     evaluate_test: bool = True,
     device: str = "auto",
     full_validation: bool = False,
+    lightgbm_selection_run: Path | None = None,
 ) -> Path:
     """Select on validation data, refit on outer training, report untouched tests.
 
@@ -1960,6 +2094,9 @@ def run_price_model_pilot(
     if split_strategy not in {"cohort_stratified", "unseen_family", "known_family"}:
         raise ValueError("Unknown split_strategy: " + split_strategy)
     training_devices = resolve_training_devices(model_names, device)
+    if lightgbm_selection_run and (model_names != ["lightgbm"] or not full_validation
+                                  or training_devices["lightgbm"]["device"] != "cpu"):
+        raise ValueError("Saved LightGBM selection requires only lightgbm, CPU, and --full-validation")
 
     # Fingerprint the same documented Parquet inputs for every feature set so
     # notebook comparisons can verify a shared data snapshot.
@@ -1968,8 +2105,9 @@ def run_price_model_pilot(
         "NHTSA_Complaints.parquet", "NHTSA_Recalls.parquet", "NHTSA_Safety.parquet",
     )]
     if model_type in YOUTUBE_MODEL_TYPES:
-        source_paths += [YOUTUBE_FEATURE_DIRECTORY / "make_features.parquet",
-                         YOUTUBE_FEATURE_DIRECTORY / "price_feature_manifest.json"]
+        youtube_path = Path(youtube_feature_dir or YOUTUBE_FEATURE_DIRECTORY)
+        source_paths += [youtube_path / "make_features.parquet",
+                         youtube_path / "price_feature_manifest.json"]
     if model_type in EXPERT_MODEL_TYPES:
         _, _, expert_source = load_expert_features(expert_feature_dir or EXPERT_FEATURE_DIRECTORY,
             vpic_sha256=file_sha256(FINAL_DATASET_PATH / "NHTSA_vPIC.parquet"))
@@ -1979,14 +2117,14 @@ def run_price_model_pilot(
     source_hashes = {(f"expert/{p.name}" if model_type in EXPERT_MODEL_TYPES and p.parent == Path(expert_source["directory"]) else p.name):
                      file_sha256(p) for p in source_paths}
     dataset_fingerprint = hashlib.sha256(json.dumps(source_hashes, sort_keys=True).encode()).hexdigest()
-    code_hashes = {name: file_sha256(PROJECT_ROOT / name) for name in (
-        "MODELS/Price_ML_Models.py", "EDA/DATA_CLEANING.py", "NHTSA/text_features.py", "EXPERT_REVIEWS/price_features.py",
-    )}
+    code_hashes = {name: file_sha256(PROJECT_ROOT / name) for name in PRICE_CODE_FILES}
     code_fingerprint = hashlib.sha256(json.dumps(code_hashes, sort_keys=True).encode()).hexdigest()
     package_versions = {p: importlib.metadata.version(p) for p in
                         ("polars", "pandas", "numpy", "scikit-learn", "catboost", "lightgbm", "xgboost", "pyarrow")}
 
     load_options = {"expert_feature_dir": expert_feature_dir} if model_type in EXPERT_MODEL_TYPES else {}
+    if model_type in YOUTUBE_MODEL_TYPES:
+        load_options['youtube_feature_dir'] = youtube_feature_dir
     polars_frame, data_info = load_model_frame(model_type, sample_size, **load_options)
     if any((p.stat().st_size, p.stat().st_mtime_ns) != source_stats[str(p)] for p in source_paths):
         raise RuntimeError("Source snapshot changed during loading; retry against a stable export")
@@ -2161,6 +2299,19 @@ def run_price_model_pilot(
             "retained_flags": [c for c in numeric_columns if c in PCR_FLAG_COLUMNS or c.endswith("__missing")],
             "categorical_fields": categorical_columns, "whiten": False,
             "selection": "31 components fixed after exploratory fit-only PCA; no component-count search"}
+    saved_selection = None
+    if lightgbm_selection_run:
+        saved_selection = _load_lightgbm_selection(lightgbm_selection_run, metadata)
+        metadata["lightgbm_selection_reuse"] = {
+            "run": str(Path(lightgbm_selection_run).resolve()),
+            "source_code_fingerprint": json.loads((Path(lightgbm_selection_run) / "run_metadata.json").read_text(encoding="utf-8"))["code_fingerprint"],
+            "selection": saved_selection,
+        }
+    if "lightgbm" in model_names:
+        metadata["lightgbm_cpu_execution"] = {"n_jobs": 1, "force_col_wise": True,
+                                             "histogram_pool_size": 512}
+        if training_devices["lightgbm"]["device"] == "cpu":
+            metadata["lightgbm_serialization"] = "bounded_tree_shards_v1"
     def checkpoint():
         metadata["elapsed_seconds"] = time.perf_counter() - run_started
         pd.DataFrame(make_price_segments).to_csv(output_dir / "make_price_metrics.csv", index=False)
@@ -2232,7 +2383,12 @@ def run_price_model_pilot(
                 kwargs = {"model__sample_weight": training_price_weights(y[fit_index], price_weighting)}
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always", ConvergenceWarning)
-                validation_model.fit(x_full_fit, y_log[fit_index], **kwargs)
+                if name == "lightgbm" and training_devices[name]["device"] == "cpu":
+                    validation_model = _fit_lightgbm_full(x_full_fit, y_log[fit_index],
+                        categorical_columns, iterations, params, kwargs["sample_weight"],
+                        output_dir / "lightgbm/full_validation_progress.json")
+                else:
+                    validation_model.fit(x_full_fit, y_log[fit_index], **kwargs)
             if any(issubclass(w.category, ConvergenceWarning) for w in caught):
                 raise RuntimeError(f"{name} full-validation fit did not converge")
             predictions = np.exp(validation_model.predict(x_full_validation))
@@ -2249,7 +2405,13 @@ def run_price_model_pilot(
             selected_evaluation = {}
             if name in TREE_MODEL_NAMES:
                 with stage(name, "tuning"):
-                    if x_validation is not None:
+                    if name == "lightgbm" and saved_selection is not None:
+                        iterations = saved_selection["iterations"]
+                        params = saved_selection["parameters"]
+                        validation_mae = saved_selection["validation_mae"]
+                        selected_cap_limited = False
+                        logger.info("Reusing checked LightGBM selection from %s", lightgbm_selection_run)
+                    elif x_validation is not None:
                         iterations, validation_mae, params, selected_cap_limited = _fit_with_early_stopping(
                             name, x_fit, y_log[tune_fit_index], x_validation, y_log[tune_validation_index],
                             categorical_columns, max_trees, diagnostics,
@@ -2275,8 +2437,13 @@ def run_price_model_pilot(
                         final_model.fit(x_train, y_log[outer_train_index], sample_weight=final_weights,
                                         cat_features=categorical_columns, verbose=False)
                     elif name == "lightgbm":
-                        final_model.fit(x_train, y_log[outer_train_index], sample_weight=final_weights,
-                                        categorical_feature=categorical_columns)
+                        if training_devices[name]["device"] == "cpu":
+                            final_model = _fit_lightgbm_full(x_train, y_log[outer_train_index],
+                                categorical_columns, iterations, params, final_weights,
+                                model_dir / "final_fit_progress.json")
+                        else:
+                            final_model.fit(x_train, y_log[outer_train_index], sample_weight=final_weights,
+                                            categorical_feature=categorical_columns)
                     else:
                         final_model.fit(x_train, y_log[outer_train_index], sample_weight=final_weights, verbose=False)
             else:
@@ -2312,6 +2479,7 @@ def run_price_model_pilot(
                                ("estimator", ExpLogPricePredictor(final_model))])
             bundle.raw_feature_columns_ = raw_features
             bundle.expert_feature_info_ = data_info.get("expert_features")
+            bundle.youtube_feature_info_ = data_info.get("youtube_features")
             joblib.dump(bundle, model_dir / "predictor.joblib", compress=3)
             logger.info("Saved fitted %s predictor; starting test metrics", name)
             with stage(name, "test_and_reports"):
@@ -2357,6 +2525,26 @@ def run_price_model_pilot(
     print(f"Saved outputs to: {output_dir}")
     return output_dir
 
+
+
+def _load_lightgbm_selection(run: Path, metadata: dict) -> dict:
+    """Reuse selection only on identical data/splits; record the intentional code change."""
+    run = Path(run)
+    previous = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))
+    keys = ("model_type", "dataset_fingerprint", "source_file_sha256", "split_fingerprint",
+            "tuning_fingerprint", "preprocessing_version", "raw_feature_columns",
+            "package_versions", "price_weighting", "split_strategy", "tuning_rows", "max_trees")
+    mismatches = [key for key in keys if previous.get(key) is None or previous[key] != metadata.get(key)]
+    if previous.get("training_devices", {}).get("lightgbm", {}).get("device") != "cpu":
+        mismatches.append("lightgbm device")
+    if mismatches:
+        raise ValueError("Saved LightGBM selection mismatch: " + ", ".join(mismatches))
+    selection = json.loads((run / "lightgbm" / "selection.json").read_text(encoding="utf-8"))
+    if (not isinstance(selection.get("iterations"), int) or selection["iterations"] <= 0
+            or set(selection.get("parameters", {})) != {"num_leaves", "learning_rate", "min_child_samples"}
+            or not isinstance(selection.get("validation_mae"), (int, float))):
+        raise ValueError("Invalid saved LightGBM selection")
+    return selection
 
 
 def _write_json_checkpoint(path: Path, contents) -> None:
@@ -2603,6 +2791,8 @@ def run_price_forecast_suite(args: Any) -> int:
                    "--price-weightings", price_weighting,
                    "--models", *variant_models]
         command += ["--expert-feature-dir", str(getattr(args, "expert_feature_dir", EXPERT_FEATURE_DIRECTORY))]
+        if getattr(args, 'youtube_feature_dir', None):
+            command += ['--youtube-feature-dir', str(args.youtube_feature_dir)]
         command += ["--device", getattr(args, "device", "auto")]
         if getattr(args, "full_validation", False):
             command.append("--full-validation")
@@ -2668,6 +2858,8 @@ if __name__ == "__main__":
                         help="Optional subset of saved models to explain.")
     parser.add_argument("--expert-feature-dir", type=Path, default=EXPERT_FEATURE_DIRECTORY,
                         help="Versioned DougScore artifacts for expert variants; build with EXPERT_REVIEWS.price_features.")
+    parser.add_argument('--youtube-feature-dir', type=Path,
+                        help='Sentiment-v2 export for every YouTube variant; defaults to the completed 75-feature export.')
     parser.add_argument("--validation-only", action="store_true", help="Tune and save fitted predictors without scoring held-out test rows.")
     parser.add_argument("--device", choices=("auto", "cpu", "gpu"), default="auto",
                         help="Probe GPU training for boosters; auto records CPU fallback when unavailable. Sklearn models stay on CPU.")
@@ -2691,7 +2883,11 @@ if __name__ == "__main__":
                         help="Target rows per tuning partition; cohort quotas may expand it to cover every cohort. Final refit uses all fit+validation rows.")
     parser.add_argument("--max-trees", type=int, default=PILOT_MAX_TREES,
                         help="Boosting ceiling (default 6400); 0 doubles budgets until early stopping completes, and grows forests until a validation plateau.")
+    parser.add_argument("--lightgbm-selection-run", type=Path,
+                        help="Reuse a matching saved CPU LightGBM selection in a new single-model full-validation run.")
     args = parser.parse_args()
+    if args.lightgbm_selection_run and (args.model_types or len(args.price_weightings) != 1):
+        parser.error("--lightgbm-selection-run requires a single feature set and weighting")
     if sum(bool(value) for value in (args.compare_runs, args.explain_runs, args.compare_suite, args.explain_suite)) > 1:
         parser.error("Choose one comparison or explanation command")
     if args.compare_suite or args.explain_suite:
@@ -2732,7 +2928,9 @@ if __name__ == "__main__":
         split_strategy=args.split_strategy,
         price_weighting=args.price_weightings[0],
         expert_feature_dir=args.expert_feature_dir,
+        youtube_feature_dir=args.youtube_feature_dir,
         evaluate_test=not args.validation_only,
         device=args.device,
         full_validation=args.full_validation,
+        lightgbm_selection_run=args.lightgbm_selection_run,
     )

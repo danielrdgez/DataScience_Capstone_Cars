@@ -1,12 +1,55 @@
 {
   "schema_version": 1,
   "similarity_run": "vehicle_similarity_v5/20261026-repair/run-reconciled",
-  "active_price": {
-    "run": "base/20261009T171630407257Z-full",
-    "model": "catboost",
-    "metadata_sha256": "44d7a8d3b99310503a8f26edce00c9e7e708db229cd817a7de0df7b9097eaae0",
-    "predictor_sha256": "b6a0433a114e78fa1674621e1f263ac738f9bccc45433292ae24daf941e6403e",
-    "selection_metric": "validation_mae_usd"
+  "active_price": null,
+  "recommendation_price_selection": {
+    "feature_sets": [
+      "base",
+      "enhanced",
+      "full"
+    ],
+    "models": [
+      "catboost",
+      "lightgbm",
+      "xgboost",
+      "multiple_linear_regression",
+      "lasso",
+      "ridge",
+      "elastic_net",
+      "pcr"
+    ]
+  },
+  "price_run_selection": {
+    "suite": "suites/20261028T023020522760Z",
+    "runs": {
+      "base": "base/20261028T023200572004Z-full",
+      "enhanced": "enhanced/20261028T161243473813Z-full",
+      "full": "full/20261029T163438030880Z-full"
+    },
+    "models": [
+      "catboost",
+      "lightgbm",
+      "xgboost",
+      "multiple_linear_regression",
+      "lasso",
+      "ridge",
+      "elastic_net",
+      "pcr"
+    ],
+    "full_continuation": {
+      "after": "20261104T000000000000Z-full",
+      "models": [
+        "lightgbm",
+        "xgboost",
+        "multiple_linear_regression",
+        "lasso",
+        "ridge",
+        "elastic_net",
+        "pcr"
+      ],
+      "per_estimator": true,
+      "lightgbm_serialization": "bounded_tree_shards_v1"
+    }
   },
   "comparison_report": "MODEL_OUTPUT\\comparisons\\20261024-app-feature-review",
   "comparison_manifest_sha256": "19504c10414009935bf9ed831873195e9739592b46c4229a62aba1a73d07b0cb",
@@ -16,5 +59,9 @@
     "model": "direct_specs"
   },
   "category_hierarchy_run": "vehicle_similarity_v5/20261026-epa-hierarchy-supported-validated",
-  "category_hierarchy_manifest_sha256": "79c763c581736135ff36cb23e7068b08312d3f6e1728991d85f79e6f32b62137"
+  "category_hierarchy_manifest_sha256": "79c763c581736135ff36cb23e7068b08312d3f6e1728991d85f79e6f32b62137",
+  "discovery_run": "vehicle_similarity_v6/20261104T204904-listing-first/bundle",
+  "discovery_manifest_sha256": "0092d2d9df6cc7bfe55cea98c37e44f42e00322e48f7de21220e788212aff99e",
+  "discovery_validation": "E:\\DataScience_Capstone_Cars\\MODEL_OUTPUT\\vehicle_similarity_v6\\20261104T204904-listing-first\\validation",
+  "recommendation_policy_version": 3
 }

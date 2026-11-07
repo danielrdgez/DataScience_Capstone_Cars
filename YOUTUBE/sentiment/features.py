@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import polars as pl
-from .common import (DEFAULTS, METHOD, STATUS, atomic_json, code_hashes, cutoff_date, file_hash,
-                     load_json, new_dir, parse_date, utc_now, versions)
+from .common import (
+    METHOD, STATUS, atomic_json, code_hashes, cutoff_date, file_hash,
+    load_json, new_dir, parse_date, utc_now, versions,
+)
 
 KEY = ['Make', 'attribution_scope', 'aspect']
 RESOLVED = ['positive', 'negative', 'neutral', 'mixed']

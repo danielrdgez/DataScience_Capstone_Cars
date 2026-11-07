@@ -90,7 +90,7 @@ class DashboardTests(unittest.TestCase):
         metrics = Path(self.temp.name) / "metrics.csv"
         pd.DataFrame([{"dimension": "epa_group", "source_agreement": .8}]).to_csv(metrics, index=False)
         catalog.hierarchy_receipt = {"metrics": str(metrics), "directory": self.temp.name}
-        code = '''from car_app.recommendation import load_similarity, category_explorer
+        code = '''from car_app.recommendation import load_similarity, _research_category_explorer as category_explorer
 c = load_similarity("fixture", (), "fixture")
 category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c.profiles.vin_count))
 '''
@@ -147,19 +147,30 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
             self.assertFalse(app.exception)
             app.selectbox(key="dashboard_discovery_grain").select("model").run()
             self.assertFalse(app.exception)
-            self.assertTrue(any("Saved v5 clustering" in row.value and "Model-level discovery" in row.value for row in app.caption))
-            self.assertEqual(app.selectbox(key="dashboard_categories_clusters_color").value,"Saved subgroup")
-            app.selectbox(key="dashboard_categories_clusters_color").select("Vehicle category").run()
+            self.assertTrue(any(row.label == "Profiles" for row in app.metric))
+            self.assertEqual(app.selectbox(key="dashboard_categories_compact_clusters_color").value,"Saved subgroup")
+            app.selectbox(key="dashboard_categories_compact_clusters_color").select("Vehicle category").run()
             catalog.manifest["completed_at"]="fresh-fixture"
             app.run()
             self.assertFalse(app.exception)
-            self.assertEqual(app.selectbox(key="dashboard_categories_clusters_color").value,"Saved subgroup")
+            self.assertEqual(app.selectbox(key="dashboard_categories_compact_clusters_color").value,"Saved subgroup")
             catalog.predictions=catalog.predictions.iloc[:0]
             app.run()
             self.assertFalse(app.exception)
-            self.assertEqual(app.selectbox(key="dashboard_categories_policy").value,"verified")
+            self.assertFalse(app.checkbox(key="dashboard_categories_compact_clusters_details").value)
+            profile_tables = [table.value for table in app.dataframe if "profile_id" in table.value]
+            self.assertFalse(profile_tables)
+            app.checkbox(key="dashboard_categories_compact_clusters_details").check().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.selectbox(key="dashboard_categories_compact_clusters_detail_kind").value, "Profiles")
+            profile_tables = [table.value for table in app.dataframe if "profile_id" in table.value]
+            self.assertEqual(len(profile_tables), 1)
 
     def setUp(self):
+        from car_app.agent import Settings
+        credentials = patch("car_app.agent.settings", return_value=Settings(""))
+        credentials.start()
+        self.addCleanup(credentials.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.source = fixture_snapshot(Path(self.temp.name))
@@ -251,20 +262,23 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
             app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
             app.segmented_control(key="dashboard_view").set_value("Vehicle categories").run()
             self.assertFalse(app.exception)
-            self.assertGreaterEqual(len(app.get("vega_lite_chart")), 3)
+            self.assertGreaterEqual(len(app.get("vega_lite_chart")), 2)
             app.selectbox(key="filter_body_types").select("SUV / Crossover").run()
+            self.assertFalse(app.exception)
+            app.checkbox(key="dashboard_categories_compact_clusters_details").check().run()
             self.assertFalse(app.exception)
             tables = [table.value for table in app.dataframe if "profile_id" in table.value]
             self.assertTrue(tables)
             self.assertTrue(all(set(table.profile_id) == {"p1"} for table in tables))
             app.switch_page("app_pages/recommendation.py").run()
             self.assertFalse(app.exception)
+            app.checkbox(key="rec_show_research").check().run()
             result = app.session_state["similarity_session"].result
             self.assertEqual(result["profile_id"], "p1")
             self.assertEqual(result["approach"], "category_cluster")
             self.assertEqual(result["alternatives"].peer_profile_id.tolist(), ["p0", "p2"])
-            app.checkbox(key="rec_budget_known").check()
-            app.button(key="rec_review").click().run()
+            app.multiselect(key="rec_priorities").set_value(["Lower purchase price"])
+            app.button(key="recommendation_search").click().run()
             draft = app.session_state["recommendation_session"].requirements.copy()
             app.number_input(key="filter_max_price").set_value(15000.).run()
             self.assertFalse(app.exception)
@@ -315,15 +329,13 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
              patch("car_app.model_registry.price_estimates", side_effect=lambda rows, config: (rows, None)):
             app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
             app.switch_page("app_pages/recommendation.py").run()
-            app.checkbox(key="rec_budget_known").check()
-            app.number_input(key="rec_budget").set_value(30000)
+            app.selectbox(key="rec_budget").select("$30,000")
+            app.multiselect(key="rec_priorities").set_value(["Lower purchase price"])
             app.multiselect(key="rec_category_market_positioning").set_value(["luxury"])
             app.selectbox(key="rec_categories_mode").select("strict")
-            app.button(key="rec_review").click().run()
             app.button(key="recommendation_search").click().run()
             self.assertFalse(app.exception)
-            self.assertEqual(app.session_state["recommendation_session"].result["listings"]["vin"].to_list(), ["b"])
-            self.assertTrue(any("provisional" in element.value.lower() for element in app.caption))
+            self.assertEqual([r["candidate_id"] for r in app.session_state["recommendation_session"].agent_result["answer"]["listings"]], ["listing:b"])
             config["similarity_run"] = "replacement"
             app.run()
             self.assertFalse(app.exception)
@@ -430,10 +442,18 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
             extra = extra.with_columns(pl.lit(value).cast(original.schema[column]).alias(column)
                                        for column, value in replacements.items() if column in original.columns)
             pl.concat([original, extra]).write_parquet(path)
-        feature_dir = directory.parents[1] / "YOUTUBE/outputs/price_features_v1"
+        from YOUTUBE.text.sentiment import DEFAULT_PRICE_FEATURE_DIRECTORY
+        from car_app.data import ROOT
+        from MODELS.Price_ML_Models import file_sha256
+        feature_dir = directory.parents[1] / DEFAULT_PRICE_FEATURE_DIRECTORY.relative_to(ROOT)
         feature_dir.mkdir(parents=True)
         pl.DataFrame({"Make": ["TOYOTA", "HONDA", "FORD"], "yt_comment_count": [20, 30, 40],
                       "yt_support_suppressed": [False, False, True]}).write_parquet(feature_dir / "make_features.parquet")
+        (feature_dir / "price_feature_manifest.json").write_text(json.dumps({
+            "state": "complete", "sentiment_schema_version": 2,
+            "attribution_scope": "explicit_comment", "window": "cumulative",
+            "features_sha256": file_sha256(feature_dir / "make_features.parquet"),
+            "feature_blocks": {"coverage": ["yt_comment_count", "yt_support_suppressed"]}}))
         filters = Filters(makes=("TOYOTA", "HONDA"), models=("Corolla", "Civic"), years=(2020, 2021))
         self.assertEqual(source.summary(filters)["listings"], 2)
         self.assertEqual(source.catalog(filters).collect()["Make"].n_unique(), 2)
@@ -446,9 +466,112 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
         self.assertEqual(source.summary(Filters(makes=filters.makes, models=("Corolla",)))["listings"], 1)
         from car_app.views import youtube_display
         shown = youtube_display(source.youtube(filters))
-        self.assertEqual(shown.columns, ["Make", "support_suppressed", "Metric", "Value"])
-        self.assertEqual(set(shown["Metric"]), {"comment_count"})
-        self.assertEqual(shown.height, 2)
+        self.assertEqual(set(shown["Feature"]), {"yt_comment_count", "yt_support_suppressed"})
+        self.assertEqual(shown.unique(subset=["Make", "Feature"]).height, 4)
+        from car_app.model_registry import price_sources
+        metadata = {"source_file_sha256": {"make_features.parquet": "fixture"},
+                    "youtube_features": {"directory": str(feature_dir)}}
+        self.assertEqual(price_sources(metadata)["make_features.parquet"], feature_dir / "make_features.parquet")
+        with self.assertRaisesRegex(ValueError, "YouTube source directory missing"):
+            price_sources({"source_file_sha256": metadata["source_file_sha256"]})
+
+    @staticmethod
+    def youtube_feature_fixture():
+        from MODELS.Price_ML_Models import YOUTUBE_EXPORT_FEATURE_COLUMNS
+
+        fields = {field: ([False, True] if field.endswith("_missing") or field == "yt_support_suppressed" else
+                          [1, 1] if field == "yt_feature_row_present" else
+                          [40, 0] if "count" in field else [.2, None])
+                  for field in YOUTUBE_EXPORT_FEATURE_COLUMNS}
+        return pl.DataFrame({"Make": ["TOYOTA", "HONDA"], **fields})
+
+    def test_youtube_input_tables_match_model_transforms_without_duplicate_features(self):
+        from MODELS.Price_ML_Models import YOUTUBE_FEATURE_COLUMNS
+        from car_app.views import youtube_feature_tables
+
+        inputs, additional = youtube_feature_tables(self.youtube_feature_fixture(), YOUTUBE_FEATURE_COLUMNS)
+        self.assertEqual(inputs.height, 80)
+        self.assertEqual(additional.height, 70)
+        self.assertEqual(set(inputs["Feature"]), set(YOUTUBE_FEATURE_COLUMNS))
+        self.assertFalse(set(inputs["Feature"]) & set(additional["Feature"]))
+        for frame in (inputs, additional):
+            self.assertEqual(frame.height, frame.unique(subset=["Make", "Feature"]).height)
+        self.assertFalse({"yt_overall_opinion_count", "yt_overall_opinion_video_count"} & set(additional["Feature"]))
+        counts = inputs.filter(pl.col("Feature") == "yt_overall_log1p_opinion_count")
+        self.assertAlmostEqual(float(counts.filter(pl.col("Make") == "TOYOTA")["Value"][0]), np.log1p(40))
+        self.assertEqual(counts.filter(pl.col("Make") == "TOYOTA")["Original count"][0], "40")
+        self.assertEqual(float(counts.filter(pl.col("Make") == "HONDA")["Value"][0]), 0.)
+        missing = inputs.filter((pl.col("Make") == "HONDA") & (pl.col("Feature") == "yt_reliability_video_balanced_net"))
+        self.assertIsNone(missing["Value"][0])
+        self.assertIn("insufficient", missing["Evidence"][0])
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            youtube_feature_tables(self.youtube_feature_fixture(), [*YOUTUBE_FEATURE_COLUMNS, YOUTUBE_FEATURE_COLUMNS[0]])
+
+    def test_youtube_panel_displays_selected_inputs_once_and_compares_makes(self):
+        from MODELS.Price_ML_Models import YOUTUBE_FEATURE_COLUMNS
+
+        data = self.youtube_feature_fixture()
+        contract = {"directory": "fixture", "source_signature": (), "as_of": "2026-10-01",
+                    "columns": list(YOUTUBE_FEATURE_COLUMNS), "runs": ["full/fixture-full"]}
+        def query(identity, filters, operation, *args):
+            if operation != "youtube":
+                return pl.DataFrame()
+            return data.filter(pl.col("Make").is_in(list(filters.makes))) if filters.makes else data
+        code = '''from types import SimpleNamespace
+from car_app.views import youtube
+from car_app.data import Filters
+youtube(SimpleNamespace(identity="fixture"), Filters(makes=("TOYOTA",)))
+'''
+        with patch("car_app.views.query_snapshot", side_effect=query), \
+             patch("car_app.views.youtube_price_contract", return_value=contract), \
+             patch("car_app.views.filter_options", return_value=(data.select("Make"), None)):
+            app = AppTest.from_string(code, default_timeout=30).run()
+            self.assertFalse(app.exception)
+            self.assertEqual(len(app.dataframe), 2)
+            self.assertEqual(len(app.dataframe[0].value), 40)
+            self.assertEqual(len(app.get("vega_lite_chart")), 1)
+            self.assertNotIn("yt_overall_video_balanced_soft_net", set(app.dataframe[0].value.Feature))
+            self.assertIn("yt_overall_video_balanced_soft_net", set(app.dataframe[1].value.Feature))
+            app.selectbox(key="youtube_compare_make").select("HONDA").run()
+            self.assertFalse(app.exception)
+            self.assertEqual(len(app.dataframe[0].value), 80)
+            self.assertEqual(set(app.dataframe[0].value.Make), {"TOYOTA", "HONDA"})
+            self.assertEqual(len(app.get("vega_lite_chart")), 1)
+            app.selectbox(key="youtube_feature_group").select("Overall sentiment").run()
+            self.assertFalse(app.exception)
+            self.assertEqual(len(app.dataframe[0].value), 8)
+
+    def test_youtube_contract_uses_recorded_source_and_rejects_source_changes(self):
+        import hashlib
+        from car_app.artifacts import youtube_price_contract
+
+        root = Path(self.temp.name) / "youtube_contract"
+        directory = root / "YOUTUBE/outputs/selected/price"
+        directory.mkdir(parents=True)
+        features = self.youtube_feature_fixture()
+        features.write_parquet(directory / "make_features.parquet")
+        manifest = {"state": "complete", "sentiment_schema_version": 2, "as_of": "2026-10-01",
+                    "attribution_scope": "explicit_comment", "window": "cumulative",
+                    "feature_blocks": {"all": [c for c in features.columns if c != "Make"]},
+                    "features_sha256": hashlib.sha256((directory / "make_features.parquet").read_bytes()).hexdigest()}
+        manifest_path = directory / "price_feature_manifest.json"
+        manifest_path.write_text(json.dumps(manifest))
+        run = root / "MODEL_OUTPUT/full/fixture-full"
+        run.mkdir(parents=True)
+        metadata = {"model_type": "full", "raw_feature_columns": ["price_feature", "yt_comment_count"],
+                    "youtube_features": {"directory": str(directory), "as_of": manifest["as_of"],
+                        "features_sha256": manifest["features_sha256"],
+                        "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest()}}
+        (run / "run_metadata.json").write_text(json.dumps(metadata))
+        (root / "car_app").mkdir()
+        (root / "car_app/artifact_registry.json").write_text(json.dumps({
+            "price_run_selection": {"runs": {"full": "full/fixture-full"}}}))
+        contract = youtube_price_contract(root)
+        self.assertEqual(contract["columns"], ["yt_comment_count"])
+        self.assertEqual(Path(contract["directory"]), directory)
+        manifest_path.write_text(json.dumps({**manifest, "as_of": "2026-10-02"}))
+        with self.assertRaisesRegex(ValueError, "differs from the Full pricing receipt"):
+            youtube_price_contract(root)
 
     def test_duplicate_decode_refuses_row_multiplication(self):
         path = self.source.directory / "NHTSA_vPIC.parquet"
@@ -577,6 +700,78 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
         self.assertEqual(unresolved["hard_requirements"], {})
         self.assertEqual(len(unresolved["unresolved_questions"]), 2)
 
+    def test_numeric_question_presets_and_custom_mileage(self):
+        from car_app.requirements import amount_label, mileage_amount, range_presets
+        for lower, upper in ((256, 3299995), (0, 400000), (1234.5, 1234.5)):
+            values = range_presets(lower, upper)
+            self.assertEqual((values[0], values[-1]), (lower, upper))
+            self.assertEqual(values, sorted(set(values)))
+            self.assertLess(len(values), 60)
+        self.assertIn(25000, range_presets(256, 3299995))
+        self.assertEqual(range_presets(None, None), [])
+        self.assertEqual(range_presets(0, float("inf")), [])
+        self.assertEqual(mileage_amount("75,000"), 75000)
+        self.assertEqual(mileage_amount(" 75.5k "), 75500)
+        self.assertEqual(mileage_amount("0"), 0)
+        self.assertIsNone(mileage_amount(None))
+        self.assertEqual(mileage_amount(amount_label(1234.5)), 1234.5)
+        for invalid in ("-1", "nan", "inf", "$75,000", "75,00", "75k miles"):
+            with self.assertRaises(ValueError):
+                mileage_amount(invalid)
+
+    def test_question_dropdowns_use_full_ranges_and_preserve_custom_caps(self):
+        from car_app.data import filter_options, query_snapshot
+        listings = pl.read_parquet(self.source.directory / "used_cars.parquet").with_columns(
+            pl.Series("price", [256, 20000, 3299995]), pl.Series("mileage", [0., 50000., 400000.]))
+        listings.write_parquet(self.source.directory / "used_cars.parquet")
+        self.source = Snapshot(self.source.directory)
+        filter_options.clear(); query_snapshot.clear()
+        self.addCleanup(filter_options.clear); self.addCleanup(query_snapshot.clear)
+        with patch("car_app.data.snapshot", return_value=self.source), \
+             patch("car_app.data.MIN_MAKE_ROWS", 1), \
+             patch("car_app.model_registry.registry", return_value={}), \
+             patch("car_app.discovery.active_catalog", return_value=None), \
+             patch("car_app.agent_ui.submit_request") as request:
+            app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
+            app.selectbox(key="filter_makes").select("TOYOTA").run()
+            app.session_state["rec_form_version"] = 2
+            app.session_state["rec_mileage"] = 50000.
+            app.switch_page("app_pages/recommendation.py").run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.selectbox(key="rec_budget").options[0], "$256")
+            self.assertEqual(app.selectbox(key="rec_budget").options[-1], "$3,299,995")
+            self.assertEqual(app.selectbox(key="rec_mileage").options[0], "0")
+            self.assertEqual(app.selectbox(key="rec_mileage").options[-1], "400,000")
+            self.assertEqual(app.selectbox(key="rec_mileage").value, "50,000")
+            self.assertTrue(app.selectbox(key="rec_budget").proto.accept_new_options)
+            self.assertTrue(app.selectbox(key="rec_mileage").proto.accept_new_options)
+            # AppTest requires custom choices in its local list to serialize typed values.
+            app.selectbox(key="rec_budget").options.append("3500k")
+            app.selectbox(key="rec_mileage").options.append("75.5k")
+            app.selectbox(key="rec_budget").set_value("3500k")
+            app.selectbox(key="rec_mileage").set_value("75.5k")
+            app.multiselect(key="rec_priorities").set_value(["Lower purchase price"])
+            app.button(key="recommendation_search").click().run()
+            self.assertFalse(app.exception)
+            hard = app.session_state["recommendation_session"].requirements["hard_requirements"]
+            self.assertEqual(hard["max_price_usd"], 3500000)
+            self.assertEqual(hard["max_mileage"], 75500)
+            app.run()
+            self.assertEqual(app.selectbox(key="rec_budget").value, "3500k")
+            self.assertEqual(app.selectbox(key="rec_mileage").value, "75.5k")
+            app.selectbox(key="rec_mileage").set_value("0")
+            app.button(key="recommendation_search").click().run()
+            self.assertEqual(app.session_state["recommendation_session"].requirements["hard_requirements"]["max_mileage"], 0)
+            app.selectbox(key="rec_mileage").set_value(None)
+            app.button(key="recommendation_search").click().run()
+            self.assertNotIn("max_mileage", app.session_state["recommendation_session"].requirements["hard_requirements"])
+            app.selectbox(key="rec_mileage").options.append("unknown")
+            app.selectbox(key="rec_mileage").set_value("unknown")
+            app.button(key="recommendation_search").click().run()
+            self.assertFalse(app.exception)
+            self.assertTrue(app.error)
+            self.assertEqual(request.call_count, 3)
+
     def test_guided_review_enables_search_without_using_dashboard_scope(self):
         from car_app.data import filter_options, query_snapshot
         filter_options.clear(); query_snapshot.clear()
@@ -586,15 +781,13 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
             app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
             app.switch_page("app_pages/recommendation.py").run()
             app.selectbox(key="rec_use_case").select("Enthusiast / weekend driving")
-            app.checkbox(key="rec_budget_known").check()
-            app.number_input(key="rec_budget").set_value(18000)
+            app.selectbox(key="rec_budget").set_value("$20,000")
             app.multiselect(key="rec_priorities").set_value(["Safety", "Performance"])
-            app.checkbox(key="rec_hp_known").check()
             app.number_input(key="rec_hp").set_value(250)
-            app.button(key="rec_review").click().run()
+            app.button(key="recommendation_search").click().run()
             self.assertFalse(app.exception)
             draft = app.session_state["recommendation_session"].requirements
-            self.assertEqual(draft["hard_requirements"]["max_price_usd"], 18000)
+            self.assertEqual(draft["hard_requirements"]["max_price_usd"], 20000)
             self.assertEqual(draft["hard_requirements"]["min_horsepower"], 250)
             self.assertNotIn("max_mileage", draft["hard_requirements"])
             self.assertNotIn("makes", draft["hard_requirements"])
@@ -606,13 +799,13 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
             self.assertFalse(app.exception)
             self.assertEqual(app.session_state["recommendation_session"].requirements, draft)
             self.assertEqual(app.session_state["recommendation_session"].revision, 1)
-            app.number_input(key="rec_budget").set_value(17000).run()
+            app.selectbox(key="rec_budget").set_value("$15,000").run()
             self.assertEqual(app.session_state["recommendation_session"].requirements, draft)
-            app.number_input(key="rec_budget").set_value(17000)
-            app.button(key="rec_review").click().run()
+            app.selectbox(key="rec_budget").set_value("$15,000")
+            app.button(key="recommendation_search").click().run()
             self.assertFalse(app.exception)
             self.assertEqual(app.session_state["recommendation_session"].revision, 2)
-            self.assertEqual(app.session_state["recommendation_session"].requirements["hard_requirements"]["max_price_usd"], 17000)
+            self.assertEqual(app.session_state["recommendation_session"].requirements["hard_requirements"]["max_price_usd"], 15000)
 
     def test_app_filters_navigation_and_reference_requirements(self):
         from car_app.data import filter_options, query_snapshot
@@ -625,8 +818,9 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
             self.assertEqual(app.session_state["dashboard_filters"].makes, ("TOYOTA",))
             app.switch_page("app_pages/recommendation.py").run()
             self.assertFalse(app.exception)
-            self.assertTrue(any(h.value == "Similar vehicles to the filter in the dashboard" for h in app.header))
-            self.assertTrue(app.button(key="recommendation_search").disabled)
+            self.assertFalse(any(h.value == "Similar vehicles to the filter in the dashboard" for h in app.header))
+            self.assertFalse(app.button(key="recommendation_search").disabled)
+            app.checkbox(key="rec_show_research").check().run()
             self.assertTrue(app.button(key="similarity_search").disabled)
             self.assertEqual(app.session_state["recommendation_session"].revision, 0)
         filter_options.clear(); query_snapshot.clear()
@@ -757,6 +951,235 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
         self.assertEqual(inventory.loc[inventory.variant.eq("full"), "status"].item(), "pilot_only")
         self.assertNotEqual(compatibility_group(metadata), compatibility_group({**metadata, "split_fingerprint": "different"}))
 
+    def test_ai_uses_newest_completed_checkpoints_across_partial_commands_without_random_forest(self):
+        from car_app.artifacts import recommendation_inventory
+        from MODELS.Price_ML_Models import MODEL_FEATURE_SETS, PREPROCESSING_VERSION
+        root = Path(self.temp.name) / "ai_selection"
+        def checkpoint(variant, name, states, compatible=True):
+            path = root / "MODEL_OUTPUT" / variant / name
+            path.mkdir(parents=True)
+            metadata = {"model_type": variant, "status": "running", "requested_sample_size": None,
+                "requested_models": list(states), "preprocessing_version": PREPROCESSING_VERSION,
+                "raw_feature_columns": list(MODEL_FEATURE_SETS[variant]) if compatible else ["obsolete"],
+                "models": {model: {"status": status} for model, status in states.items()}}
+            (path / "run_metadata.json").write_text(json.dumps(metadata))
+            pd.DataFrame([{"model": model, "mae": 10., "rmse": 20., "validation_mae": 11.}
+                          for model in states]).to_csv(path / "metrics.csv", index=False)
+            pd.DataFrame([{"model": model, "validation_mae": 11.} for model in states]).to_csv(path / "validation_metrics.csv", index=False)
+            for model in states:
+                (path / model).mkdir()
+                (path / model / "predictor.joblib").write_bytes(b"fixture")
+                for partition in ("test", "validation"):
+                    (path / f"{model}_{partition}_predictions.parquet").write_bytes(b"fixture")
+        checkpoint("base", "20260101-full", {"catboost": "completed", "ridge": "completed"})
+        checkpoint("enhanced", "20260102-full", {"catboost": "completed", "ridge": "completed"})
+        checkpoint("full", "20260103-full", {"catboost": "completed", "ridge": "running"})
+        checkpoint("full", "20260104-full", {"ridge": "completed", "random_forest": "completed"})
+        checkpoint("full", "20260105-full", {"ridge": "completed"}, compatible=False)
+        policy = {"recommendation_price_selection": {"feature_sets": ["base", "enhanced", "full"],
+                  "models": ["catboost", "ridge", "random_forest"]}}
+        with patch("car_app.artifacts.ROOT", root):
+            _, choices, statuses, _ = recommendation_inventory(policy)
+        self.assertEqual(len(choices), 6)
+        selected = choices.set_index("label").run.to_dict()
+        self.assertEqual(selected["full-catboost"], "full/20260103-full")
+        self.assertEqual(selected["full-ridge"], "full/20260104-full")
+        self.assertNotIn("random_forest", set(choices.model) | set(statuses.model))
+
+    def test_changed_inference_code_requires_frozen_input_and_vin_aligned_prediction_replay(self):
+        import hashlib
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from car_app.model_registry import verify_inference_replay
+        root = Path(self.temp.name) / "replay"
+        run = root / "MODEL_OUTPUT/base/20260101-full"
+        (run / "ridge").mkdir(parents=True)
+        pd.DataFrame({"vin": ["a", "b"]}).to_parquet(run / "shap_receipt.parquet")
+        pd.DataFrame({"x": [1., 2.]}).to_parquet(run / "shap_inputs.parquet")
+        pd.DataFrame({"x": [1.]}).to_parquet(run / "shap_background.parquet")
+        pd.DataFrame({"vin": ["b", "a"], "prediction": [200., 100.]}).to_parquet(run / "ridge_test_predictions.parquet")
+        (run / "ridge/predictor.joblib").write_bytes(b"fixture")
+        hashes = {name: hashlib.sha256((run / name).read_bytes()).hexdigest()
+                  for name in ("shap_inputs.parquet", "shap_receipt.parquet", "shap_background.parquet")}
+        metadata = {"model_type": "base", "raw_feature_columns": ["x"], "feature_columns": ["x"],
+            "shap_inputs": "shap_inputs.parquet", "shap_receipt": "shap_receipt.parquet",
+            "shap_background": "shap_background.parquet", "shap_input_sha256": hashes,
+            "source_file_sha256": {}, "code_fingerprint": "training"}
+        predictor = SimpleNamespace(named_steps={"input": SimpleNamespace(transform=lambda data: data)},
+                                    predict=Mock(return_value=np.array([100., 200.])))
+        with patch("car_app.model_registry.ROOT", root), \
+             patch("car_app.model_registry.prediction_inputs", return_value=pl.DataFrame({"vin": ["a", "b"], "x": [1., 2.]})), \
+             patch("car_app.model_registry.inference_code_fingerprint", return_value="current"), \
+             patch("joblib.load", return_value=predictor):
+            receipt = verify_inference_replay(run, metadata, "ridge", "current")
+            self.assertEqual(receipt["maximum_absolute_usd_difference"], 0)
+            verify_inference_replay(run, metadata, "ridge", "current")
+            self.assertEqual(predictor.predict.call_count, 1)
+            predictor.predict.return_value = np.array([110., 200.])
+            with self.assertRaisesRegex(ValueError, "does not reproduce"):
+                verify_inference_replay(run, metadata, "ridge", "different-code")
+            pd.DataFrame({"x": [9., 2.]}).to_parquet(run / "shap_inputs.parquet")
+            with self.assertRaisesRegex(ValueError, "Frozen inference reference changed"):
+                verify_inference_replay(run, metadata, "ridge", "current")
+
+    def test_selected_suite_never_fills_pending_models_from_other_runs(self):
+        from car_app.artifacts import diagnostic_inventory
+        root = Path(self.temp.name) / "selected_models"
+        selection = {"runs": {"base": "base/20260102-full", "full": "full/20260102-full"},
+                     "models": ["catboost", "ridge", "pcr"]}
+
+        def checkpoint(variant, name, states):
+            path = root / "MODEL_OUTPUT" / variant / name
+            path.mkdir(parents=True, exist_ok=True)
+            metadata = {"model_type": variant, "status": "running", "requested_sample_size": None,
+                        "models": {model: {"status": state} for model, state in states.items()}}
+            (path / "run_metadata.json").write_text(json.dumps(metadata))
+            pd.DataFrame([{"model": model, "mae": 10., "rmse": 20., "validation_mae": 11.}
+                          for model in states]).to_csv(path / "metrics.csv", index=False)
+            pd.DataFrame([{"model": model, "validation_mae": 11.}
+                          for model in states]).to_csv(path / "validation_metrics.csv", index=False)
+            for model in states:
+                (path / model).mkdir(exist_ok=True)
+                (path / model / "predictor.joblib").write_bytes(b"fixture-not-executed")
+                for partition in ("test", "validation"):
+                    (path / f"{model}_{partition}_predictions.parquet").write_bytes(b"fixture-not-read")
+            return path
+
+        checkpoint("base", "20260101-full", {"catboost": "completed", "ridge": "completed"})
+        checkpoint("base", "20260103-full", {"catboost": "completed", "ridge": "completed"})
+        checkpoint("base", "20260102-full", {"catboost": "completed", "ridge": "running", "random_forest": "completed"})
+        full = checkpoint("full", "20260102-full", {"catboost": "completed", "pcr": "running"})
+        with patch("car_app.artifacts.ROOT", root):
+            _, choices, statuses, _ = diagnostic_inventory(selection)
+            self.assertEqual(set(choices.label), {"base-catboost", "full-catboost"})
+            self.assertEqual(set(choices.run), set(selection["runs"].values()))
+            self.assertEqual(len(statuses), 5)
+            self.assertFalse(statuses.loc[statuses.model.eq("pcr"), "status"].eq("completed").any())
+            checkpoint("full", "20260102-full", {"catboost": "completed", "pcr": "completed"})
+            self.assertIn("full-pcr", diagnostic_inventory(selection)[1].label.tolist())
+            # A metadata receipt alone cannot publish an incomplete prediction file.
+            (full / "pcr_validation_predictions.parquet").write_bytes(b"")
+            self.assertNotIn("full-pcr", diagnostic_inventory(selection)[1].label.tolist())
+            (full / "run_metadata.json").unlink()
+            _, choices, statuses, _ = diagnostic_inventory(selection)
+            self.assertEqual(choices.label.tolist(), ["base-catboost"])
+            self.assertEqual(set(statuses.loc[statuses.feature_set.eq("full"), "status"]), {"pending"})
+
+    def test_full_continuation_keeps_catboost_and_rejects_other_training_commands(self):
+        from car_app.artifacts import diagnostic_inventory
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = "full/20261029-full"
+            models = ["ridge", "pcr"]
+            selection = {"runs": {"full": reference}, "models": ["catboost", *models],
+                         "full_continuation": {"after": "20261104", "models": models}}
+            contract = {key: "same" for key in ("raw_feature_columns", "source_file_sha256",
+                "split_fingerprint", "preprocessing_version", "package_versions", "tuning_rows",
+                "max_trees", "price_weighting", "split_strategy", "device_request", "full_validation")}
+
+            def checkpoint(name, requested):
+                path = root / "MODEL_OUTPUT" / name
+                path.mkdir(parents=True)
+                (path / "run_metadata.json").write_text(json.dumps({**contract, "model_type": "full",
+                    "requested_sample_size": None, "requested_models": requested, "status": "running",
+                    "models": {model: {"status": "completed"} for model in requested}}))
+                for table in ("metrics.csv", "validation_metrics.csv"):
+                    pd.DataFrame([{"model": model, "mae": 1., "rmse": 2., "validation_mae": 3.}
+                                  for model in requested]).to_csv(path / table, index=False)
+                for model in requested:
+                    (path / model).mkdir()
+                    (path / model / "predictor.joblib").write_bytes(b"fixture")
+                    for partition in ("test", "validation"):
+                        (path / f"{model}_{partition}_predictions.parquet").write_bytes(b"fixture")
+
+            checkpoint(reference, ["catboost", "ridge"])
+            with patch("car_app.artifacts.ROOT", root):
+                _, choices, statuses, _ = diagnostic_inventory(selection)
+                self.assertEqual(choices.model.tolist(), ["catboost"])
+                self.assertEqual(statuses.status.tolist(), ["completed", "pending", "pending"])
+                checkpoint("full/20261104-full", models)
+                checkpoint("full/20261105-full", ["random_forest", *models])
+                _, choices, _, _ = diagnostic_inventory(selection)
+                self.assertEqual(set(choices.model), {"catboost", *models})
+                self.assertEqual(choices.loc[choices.model.eq("catboost"), "run"].item(), reference)
+                self.assertEqual(set(choices.loc[choices.model.ne("catboost"), "run"]), {"full/20261104-full"})
+                selection["full_continuation"]["per_estimator"] = True
+                checkpoint("full/20261106-full", ["pcr"])
+                checkpoint("full/20261107-full", ["pcr"])
+                (root / "MODEL_OUTPUT/full/20261107-full/pcr/predictor.joblib").unlink()
+                _, choices, _, _ = diagnostic_inventory(selection)
+                self.assertEqual(choices.loc[choices.model.eq("pcr"), "run"].item(), "full/20261106-full")
+                self.assertEqual(choices.loc[choices.model.eq("ridge"), "run"].item(), "full/20261104-full")
+                models.append("lightgbm")
+                selection["models"].append("lightgbm")
+                checkpoint("full/20261108-full", ["lightgbm"])
+                receipt = root / "MODEL_OUTPUT/full/20261108-full/run_metadata.json"
+                metadata = json.loads(receipt.read_text())
+                metadata["device_request"] = "cpu"
+                receipt.write_text(json.dumps(metadata))
+                _, choices, _, _ = diagnostic_inventory(selection)
+                self.assertIn("lightgbm", choices.model.tolist())
+                selection["full_continuation"]["lightgbm_serialization"] = "bounded_tree_shards_v1"
+                self.assertNotIn("lightgbm", diagnostic_inventory(selection)[1].model.tolist())
+                metadata["lightgbm_serialization"] = "bounded_tree_shards_v1"
+                metadata["models"]["lightgbm"]["status"] = "running"
+                receipt.write_text(json.dumps(metadata))
+                self.assertNotIn("lightgbm", diagnostic_inventory(selection)[1].model.tolist())
+                metadata["models"]["lightgbm"]["status"] = "completed"
+                receipt.write_text(json.dumps(metadata))
+                self.assertIn("lightgbm", diagnostic_inventory(selection)[1].model.tolist())
+                metadata["split_fingerprint"] = "different"
+                receipt.write_text(json.dumps(metadata))
+                self.assertNotIn("lightgbm", diagnostic_inventory(selection)[1].model.tolist())
+
+    def test_selected_suite_default_uses_validation_and_refreshes_metadata_pin(self):
+        from car_app.model_registry import registry
+        candidates = pd.DataFrame([
+            {"feature_set": "base", "model": "catboost", "run": "base/selected-full", "validation_mae": 20., "test_mae": 1.},
+            {"feature_set": "full", "model": "ridge", "run": "full/selected-full", "validation_mae": 10., "test_mae": 50.}])
+        config = {"price_run_selection": {"runs": {"full": "full/selected-full"}, "models": ["ridge"]},
+                  "active_price": {"run": "old/run", "model": "random_forest"}}
+        with patch("car_app.model_registry.read_json", return_value=config), \
+             patch("car_app.artifacts.diagnostic_inventory", return_value=({}, candidates, pd.DataFrame(), pd.DataFrame())), \
+             patch("car_app.model_registry.digest", side_effect=["metadata-1", "predictor", "metadata-2", "predictor"]):
+            first = registry()["active_price"]
+            second = registry()["active_price"]
+        self.assertEqual(first["run"], "full/selected-full")
+        self.assertEqual(first["model"], "ridge")
+        self.assertNotEqual(first["metadata_sha256"], second["metadata_sha256"])
+        with patch("car_app.model_registry.read_json", return_value=config), \
+             patch("car_app.artifacts.diagnostic_inventory", return_value=({}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame())):
+            self.assertIsNone(registry()["active_price"])
+
+    def test_performance_tab_scopes_both_partitions_and_shows_pending_models(self):
+        from car_app.artifacts import Run
+        run = Run(ROOT / "MODEL_OUTPUT/base/selected-full", {"model_type": "base", "split_strategy": "cohort_stratified"})
+        candidates = pd.DataFrame([{"feature_set": "base", "model": "catboost", "run": run.name}])
+        statuses = pd.DataFrame([{"feature_set": "base", "model": "catboost", "status": "completed"},
+                                 {"feature_set": "full", "model": "pcr", "status": "pending"}])
+        metrics = pd.DataFrame([{"model": model, "mae": 10., "validation_mae": 11.}
+                                for model in ("catboost", "random_forest", "training_median_baseline")])
+
+        def script():
+            from types import SimpleNamespace
+            from car_app.data import Filters
+            from car_app.views import models
+            models(SimpleNamespace(identity="fixture"), Filters())
+
+        with patch("car_app.views.diagnostic_inventory", return_value=({run.name: run}, candidates, statuses, pd.DataFrame())), \
+             patch.object(Run, "table", side_effect=lambda name: metrics if name == "metrics.csv" else pd.DataFrame()), \
+             patch.object(Run, "prediction_path", return_value=None), \
+             patch("car_app.views.saved_shap", return_value=pd.DataFrame()):
+            app = AppTest.from_function(script, default_timeout=15).run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.dataframe[0].value.status.tolist(), ["completed", "pending"])
+            self.assertEqual(app.dataframe[1].value.model.tolist(), ["catboost"])
+            self.assertIn("same groups appear", " ".join(c.value for c in app.caption).lower())
+            app.segmented_control(key="evaluation_mode").set_value("Validation").run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.dataframe[1].value.model.tolist(), ["catboost"])
+            self.assertEqual(app.dataframe[1].value.mae.tolist(), [11.])
+
     def test_generate_renders_results_and_keeps_independent_budget(self):
         from car_app.data import filter_options, query_snapshot
         filter_options.clear(); query_snapshot.clear()
@@ -766,16 +1189,649 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
              patch("car_app.model_registry.price_estimates", side_effect=lambda rows, config: (rows, None)):
             app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
             app.switch_page("app_pages/recommendation.py").run()
-            app.checkbox(key="rec_budget_known").check()
-            app.number_input(key="rec_budget").set_value(20000)
-            app.button(key="rec_review").click().run()
+            app.selectbox(key="rec_budget").select("$20,000")
+            app.multiselect(key="rec_priorities").set_value(["Lower purchase price"])
             app.button(key="recommendation_search").click().run()
             self.assertFalse(app.exception)
-            result = app.session_state["recommendation_session"].result
-            self.assertEqual(result["listings"]["vin"].to_list(), ["a", "b"])
+            result = app.session_state["recommendation_session"].agent_result
+            self.assertEqual([r["candidate_id"] for r in result["answer"]["listings"]], ["listing:a"])
+            self.assertEqual(result["telemetry"]["failure_category"], "missing_credentials")
+            self.assertFalse(any(h.value.startswith("Best AI match") for h in app.subheader))
             self.assertEqual(result["eligible_listings"], 2)
             app.selectbox(key="filter_makes").select("TOYOTA").run()
-            self.assertEqual(app.session_state["recommendation_session"].result["eligible_listings"], 2)
+            self.assertEqual(app.session_state["recommendation_session"].agent_result["eligible_listings"], 2)
+
+
+class DiscoveryRankingTests(unittest.TestCase):
+    def test_v6_peers_use_query_fit_and_exclude_family_body_and_year_mismatches(self):
+        import joblib
+        from car_app.discovery import Catalog
+        from MODELS.vehicle_similarity_v3 import fit_metric
+
+        profiles = pd.DataFrame([
+            ("query", "TOYOTA|COROLLA", 2020, 0, "Sedan", 100., 180.),
+            ("same_family", "TOYOTA|COROLLA", 2019, 0, "Sedan", 100., 180.),
+            ("peer", "HONDA|CIVIC", 2020, 1, "Sedan", 101., 181.),
+            ("peer_older", "HONDA|CIVIC", 2019, 1, "Sedan", 102., 182.),
+            ("second", "MAZDA|3", 2020, 2, "Sedan", 104., 186.),
+            ("wrong_body", "HONDA|CRV", 2020, 1, "SUV / crossover", 100., 180.),
+            ("too_old", "TEST|OLD", 1990, 1, "Sedan", 100., 180.),
+            ("unsupported", "TEST|SPARSE", 2020, 1, "Sedan", 100., 180.),
+        ], columns=["profile_id", "family_block", "ModelYear", "fold", "category", "wheelbase", "length"])
+        profiles["powertrain"] = "gasoline"
+        profiles["fuel_type"] = "GASOLINE"
+        catalog = Catalog.__new__(Catalog)
+        catalog.profiles, catalog.grain = profiles, "model"
+        context = catalog.context(profiles.iloc[0])
+        catalog.assignments = pd.DataFrame({"profile_id": profiles.profile_id, "context": context,
+            "eligible": profiles.profile_id.ne("unsupported"), "cluster": 0, "description": "Query fit", "status": "assigned"})
+        catalog.assignments = pd.concat([catalog.assignments, pd.DataFrame([{
+            "profile_id": "peer", "context": catalog.context(profiles.iloc[2]), "eligible": True,
+            "cluster": 1, "description": "Peer's own fit", "status": "assigned"}])], ignore_index=True)
+        with tempfile.TemporaryDirectory() as directory:
+            catalog.specs = Path(directory)
+            path = catalog.specs / "model/contexts" / context
+            path.mkdir(parents=True)
+            metric = fit_metric(profiles.loc[profiles.fold.ne(0)], ["wheelbase", "length", "fuel_type"])
+            joblib.dump({"metric": metric}, path / "retrieval.joblib")
+            peers, actual_context = catalog.similar("query")
+            self.assertEqual(peers.profile_id.tolist(), ["peer", "second"])
+            self.assertEqual(actual_context, context)
+            self.assertTrue(peers.shared_cluster.all())
+            self.assertEqual(set(peers.description), {"Query fit"})
+            scoped, _ = catalog.similar("query", candidate_ids={"peer_older", "second"})
+            self.assertEqual(scoped.profile_id.tolist(), ["peer_older", "second"])
+            catalog.assignments.loc[catalog.assignments.profile_id.eq("query"), "cluster"] = -1
+            self.assertTrue(catalog.similar("query")[0].shared_cluster.isna().all())
+
+    def test_v6_listing_labels_use_own_fold_without_changing_cohort_identity(self):
+        from types import SimpleNamespace
+        from car_app.discovery import with_listing_clusters
+
+        catalog = SimpleNamespace(
+            members=pd.DataFrame({"vin": ["a", "b"], "profile_id": ["p", "unresolved"]}),
+            profiles=pd.DataFrame({"profile_id": ["p", "unresolved"], "fold": [1, 2]}),
+            assignments=pd.DataFrame({"profile_id": ["p", "p"], "fold": [0, 1],
+                "description": ["Other fit", "Own fit"], "status": ["assigned", "direct_fallback"], "context": ["c0", "c1"]}))
+        listings = pl.DataFrame({"vin": ["a", "b"], "Model": ["Original case", "Missing body"], "Trim": [None, "BASE"]})
+        result = with_listing_clusters(listings, catalog)
+        self.assertEqual(result["Model"].to_list(), listings["Model"].to_list())
+        self.assertEqual(result["Trim"].to_list(), listings["Trim"].to_list())
+        self.assertEqual(result["cluster_description"].to_list(), ["Own fit", None])
+        self.assertEqual(result["cluster_status"].to_list(), ["direct_fallback", None])
+
+    def test_v6_loader_requires_matching_full_validation_and_unchanged_report(self):
+        from car_app.discovery import load_catalog
+        from MODELS import discovery_artifacts as artifacts
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle, validation = root / "MODEL_OUTPUT/run/bundle", root / "validation"
+            bundle.mkdir(parents=True)
+            validation.mkdir()
+            receipt = {"schema_version": artifacts.VERSION, "status": "completed", "stage": "attach-evidence",
+                       "artifacts": {}, "dependencies": [], "source_hashes": {}, "reduced_budget": False}
+            artifacts.write_json(bundle / "manifest.json", receipt)
+            bundle_hash = artifacts.file_hash(bundle / "manifest.json")
+            run = {"directory": str(bundle.resolve()), "sha256": bundle_hash}
+            report = {"passed": True, "run": run, "checks": []}
+            artifacts.write_json(validation / "validation.json", report)
+            validated = {**receipt, "stage": "validate", "passed": True, "run": run,
+                         "artifacts": {"validation.json": artifacts.file_hash(validation / "validation.json")}}
+            artifacts.write_json(validation / "manifest.json", validated)
+            arguments = ("run/bundle", (), bundle_hash, "fixture", directory, (), str(validation), (), "model")
+            load_catalog.clear()
+            self.addCleanup(load_catalog.clear)
+            with patch.object(artifacts, "ROOT", root), patch.object(artifacts, "source_hashes", return_value={}), \
+                 patch("car_app.discovery.Catalog") as catalog:
+                self.assertIs(load_catalog(*arguments), catalog.return_value)
+                load_catalog.clear()
+                artifacts.write_json(validation / "manifest.json", {**validated, "run": {**run, "sha256": "other"}})
+                with self.assertRaisesRegex(ValueError, "validation does not match"):
+                    load_catalog(*arguments)
+                load_catalog.clear()
+                artifacts.write_json(validation / "manifest.json", validated)
+                artifacts.write_json(validation / "validation.json", {**report, "passed": False})
+                from car_app.artifacts import stat_key
+                changed_arguments = (*arguments[:7], stat_key(validation / "validation.json"), *arguments[8:])
+                with self.assertRaisesRegex(ValueError, "artifact changed"):
+                    load_catalog(*changed_arguments)
+
+    def test_full_population_is_ranked_before_five_result_limit(self):
+        from car_app.discovery import diverse_top
+        rows = pd.DataFrame({"vin": [str(i) for i in range(12)], "family_id": [str(i) for i in range(12)],
+            "ModelYear": [2015] * 12, "Make": ["TEST"] * 12, "Model": [str(i) for i in range(12)],
+            "Trim": ["BASE"] * 12, "price": [10000] * 12, "score": list(range(12))})
+        result = diverse_top(rows, ["score"], [False])
+        self.assertEqual(result.score.tolist(), [11, 10, 9, 8, 7])
+
+    def test_question_draft_keeps_evidence_preferences_out_of_hard_filters(self):
+        from car_app.requirements import QuestionDraft
+        draft = QuestionDraft(use_case="Daily commute", max_price_usd=20000, evidence_period="latest_saved",
+                              reference_profile_id="reference", avoided_components=("brakes",))
+        contract = draft.contract("snapshot", 1)
+        self.assertEqual(contract["schema_version"], 3)
+        self.assertEqual(contract["avoided_components"], ["brakes"])
+        self.assertNotIn("evidence_period", contract["hard_requirements"])
+        self.assertNotIn("avoided_components", contract["hard_requirements"])
+        self.assertFalse(contract["llm"]["api_calls_enabled"])
+
+    def test_safety_ranking_requires_reference_weight_coverage(self):
+        from car_app.discovery import applicable_safety
+        reference = pd.DataFrame({"curb_weight_lb": [3200.], "curb_weight_lb_n": [5], "vin_count": [100]})
+        result, reason = applicable_safety(pd.DataFrame(), None, reference)
+        self.assertTrue(result.empty)
+        self.assertIn("curb weight", reason)
+
+
+class DiscoveryVisualizationTests(unittest.TestCase):
+    def test_cells_preserve_unknown_zero_raw_units_and_observation_counts(self):
+        from car_app.discovery import measure_cells, specification_summary
+
+        profiles = pd.DataFrame({"cluster": [0, 0, -1, -1], "description": ["Compact"] * 4,
+            "status": ["assigned", "assigned", "direct_fallback", "insufficient_observations"],
+            "horsepower": [100., 300., 0., np.nan], "length": [180., np.nan, 150., np.nan]})
+        original = profiles.copy(deep=True)
+        _, summary = specification_summary(profiles, ["horsepower", "length"])
+        self.assertEqual(len(summary), 3)
+        group = summary.loc[summary.index.str.startswith("Group")]
+        self.assertEqual(group.horsepower.iloc[0], 200.)
+        self.assertEqual(group.length_observed.iloc[0], 1)
+        cells = measure_cells(summary, ["horsepower", "length"], {}, bounds=([100., 160.], [150., 200.]))
+        self.assertTrue(cells.loc[cells.value.eq(200), "shade"].eq(1).all())
+        self.assertIn("Unknown", cells.display.tolist())
+        self.assertIn("0", cells.display.tolist())
+        self.assertTrue(cells.loc[cells.measure.eq("length") & cells.value.eq(180), "observed_profiles"].eq(1).all())
+        pd.testing.assert_frame_equal(original, profiles)
+
+    def test_text_similarity_uses_saved_vectors_and_supported_distinct_families(self):
+        from car_app.discovery import text_neighbors
+
+        profiles = pd.DataFrame({"family_id": ["q", "same", "limited", "near", "far", "zero"],
+            "family_block": ["QUERY", "QUERY", "LIMITED", "NEAR", "FAR", "ZERO"], "identity_complete": True})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            pd.DataFrame({"family_id": profiles.family_id, "supported": [True, True, False, True, True, True]}).to_parquet(path / "family_features.parquet")
+            pd.DataFrame({"family_id": profiles.family_id, "vector_row": range(6)}).to_parquet(path / "family_vector_index.parquet")
+            np.save(path / "family_vectors.npy", [[1., 0.], [1., 0.], [1., 0.], [.8, .6], [0., 1.], [0., 0.]])
+            result = text_neighbors(path, profiles, "q")
+            self.assertEqual(result.family_id.tolist(), ["near", "far"])
+            self.assertAlmostEqual(result.cosine_similarity.iloc[0], .8)
+            self.assertEqual(text_neighbors(path, profiles.loc[profiles.family_id.ne("near")], "q").family_id.tolist(), ["far"])
+            self.assertTrue(text_neighbors(path, profiles, "limited").empty)
+
+    def test_component_and_safety_views_render_without_projection_or_text_vectors(self):
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            text = root / "text"
+            text.mkdir()
+            (text / "manifest.json").write_text(json.dumps({"audits": {"latest_saved": {
+                "cutoff": "2026-10-28", "maximum_evidence_date": "2026-09-23"}}}))
+            profiles = pd.DataFrame({"profile_id": ["p", "r"], "family_id": ["f", "g"], "fold": [0, 1],
+                "ModelYear": [2020, 2020], "Make": ["TEST", "OTHER"], "Model": ["One", "Two"],
+                "Trim": [None, None], "category": "Sedan", "identity_complete": True, "family_block": ["TEST|ONE", "OTHER|TWO"]})
+            components = pd.DataFrame({"family_id": ["f"], "source": ["complaint"], "record_count": [2],
+                "usable_text_count": [2], "supported": [False], "brakes_share": [0.], "brakes_count": [0]})
+            safety = profiles.iloc[:1].assign(vehicle_id="v", variant_description="2020 TEST One", rating_era="post_2011",
+                OverallSideCrashRating=5., RolloverRating=np.nan, SidePoleCrashRating=4.)
+            catalog = SimpleNamespace(path=root / "bundle", text=text, profiles=profiles, safety=safety, grain="model",
+                receipt={"completed_at": "2026-10-29", "periods": ["latest_saved"]},
+                scope=lambda source, filters: profiles.copy(), components=lambda period: components.copy())
+            for view in ("Complaints", "Recalls", "Safety"):
+                with self.subTest(view=view), patch("car_app.discovery.active_catalog", return_value=catalog), \
+                     patch("car_app.discovery.stat_key", return_value=()), \
+                     patch("car_app.discovery.family_records", return_value=pd.DataFrame(columns=["family_id", "source"])):
+                    code = "from car_app.discovery import nhtsa_dashboard\nfrom car_app.data import Filters\nnhtsa_dashboard(None, Filters(), view=" + repr(view) + ")"
+                    app = AppTest.from_string(code, default_timeout=20).run()
+                    self.assertFalse(app.exception)
+                    self.assertEqual(len(app.get("vega_lite_chart")), 1)
+                    display_key = "v6_nhtsa_safety_display" if view == "Safety" else "v6_nhtsa_display"
+                    self.assertEqual(app.segmented_control(key=display_key).value, "Overview")
+                    app.segmented_control(key=display_key).set_value("Compare vehicles").run()
+                    self.assertFalse(app.exception)
+                    self.assertTrue(app.info)
+                    app.multiselect[0].set_value(["v"] if view == "Safety" else ["f", "g"]).run()
+                    app.segmented_control(key=display_key).set_value("Compare vehicles").run()
+                    self.assertFalse(app.exception)
+                    self.assertGreater(len(app.get("vega_lite_chart")), 0)
+                    app.segmented_control(key=display_key).set_value("Advanced exploration").run()
+                    self.assertFalse(app.exception)
+                    self.assertTrue(app.info)
+
+
+class AgentTests(unittest.TestCase):
+    @staticmethod
+    def review(conversation):
+        ids = list(conversation.context.listings)[:6]
+        conversation.tool_result(lambda: conversation.context.recommendation_evidence(ids))
+
+    def setUp(self):
+        from car_app.agent import Settings
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.source = fixture_snapshot(Path(self.temp.name))
+        self.categories = {"makes": ["TOYOTA"], "body_types": ["Sedan"], "fuels": ["Gasoline"],
+                           "drivetrains": ["FWD"], "transmissions": [], "vehicle_categories": {}}
+        self.requirements = QuestionDraft("Daily commute", max_price_usd=20000).contract(self.source.identity, 1)
+        stub = patch("car_app.agent.settings", return_value=Settings("fixture-only"))
+        stub.start()
+        self.addCleanup(stub.stop)
+
+    @staticmethod
+    def provider_result(answer):
+        from types import SimpleNamespace
+        return SimpleNamespace(final_output=answer, context_wrapper=SimpleNamespace(usage=SimpleNamespace(
+            requests=1, input_tokens=100, output_tokens=50, total_tokens=150)))
+
+    def test_conversation_two_turn_revision_and_qualifying_cohort_receipt(self):
+        from car_app.agent import AgentAnswer, PreferenceChange, RankedCandidate, run_turn, markdown_receipt
+        async def provider(c, inputs, config):
+            offered = json.loads(inputs[0]["content"].split("Current application context: ", 1)[1])
+            self.assertIn("Lower advertised mileage", offered["preference_options"]["priorities"])
+            self.assertIn("Not decided", offered["preference_options"]["use_case"])
+            self.assertEqual(offered["data_dictionary"]["source"], "DATA_DICTIONARY.md")
+            price_definition = next(row["definition"] for row in offered["data_dictionary"]["definitions"]
+                                    if row["definition"].startswith("`price` |"))
+            self.assertIn("Advertised price in USD", price_definition)
+            if "$15,000" in c.user_message:
+                c.update([PreferenceChange(field="max_price_usd", operation="set", value=15000,
+                                           statement="maximum $15,000")])
+            c.search()
+            self.review(c)
+            rows = list(c.context.listings.values())
+            return self.provider_result(AgentAnswer(message="Historical results", questions=[],
+                listings=[RankedCandidate(candidate_id=r["candidate_id"], reason="Observed catalog facts", tradeoff="Condition is unverified.", comparison="Fits the stated price priority.",
+                                          source_refs=[r["source_refs"][0]]) for r in rows], cohorts=[]))
+        first = run_turn(self.source, self.requirements, 1, self.categories, "Show results", [], {}, provider=provider)
+        self.assertIsNone(first["telemetry"]["failure_category"])
+        self.assertEqual(set(first["candidates"]), {"listing:a", next(k for k in first["candidates"] if k.startswith("cohort:"))})
+        cohort = next(r for r in first["candidates"].values() if "qualifying_listings" in r)
+        self.assertEqual((cohort["qualifying_listings"], cohort["median_price"]), (1, 10000))
+        second = run_turn(self.source, first["requirements"], first["revision"], self.categories,
+                          "Use maximum $15,000", [], {}, provider=provider)
+        self.assertEqual(second["revision"], 2)
+        self.assertEqual([r["candidate_id"] for r in second["answer"]["listings"]], ["listing:a"])
+        json.dumps(second, allow_nan=False)
+        self.assertIn(second["snapshot_identity"], markdown_receipt(second))
+        self.assertIn("listing:a:facts", markdown_receipt(second))
+        self.assertEqual(second["evidence_reviewed_ids"], ["listing:a"])
+        self.assertEqual(first["data_dictionary"]["sha256"], second["data_dictionary"]["sha256"])
+
+    def test_performance_retrieval_does_not_hide_stronger_eligible_vehicles_behind_cheap_models(self):
+        from car_app.agent_context import RecommendationContext
+        listings = pl.read_parquet(self.source.directory / "used_cars.parquet").with_columns(
+            pl.when(pl.col("vin") == "b").then(600.).otherwise(100.).alias("horsepower"),
+            pl.when(pl.col("vin") == "b").then(49000).otherwise(pl.col("price")).alias("price"))
+        decoded = pl.read_parquet(self.source.directory / "NHTSA_vPIC.parquet").with_columns(
+            pl.when(pl.col("vin") == "b").then(pl.lit("Performance model")).otherwise(pl.col("Model")).alias("Model"))
+        for index in range(15):
+            vin = f"cheap{index}"
+            listings = pl.concat([listings, listings.head(1).with_columns(
+                pl.lit(vin).alias("vin"), pl.lit(vin).alias("listing_id"))])
+            decoded = pl.concat([decoded, decoded.head(1).with_columns(
+                pl.lit(vin).alias("vin"), pl.lit(f"Cheap model {index}").alias("Model"))])
+        listings.write_parquet(self.source.directory / "used_cars.parquet")
+        decoded.write_parquet(self.source.directory / "NHTSA_vPIC.parquet")
+        source = Snapshot(self.source.directory)
+        requirements = QuestionDraft("Enthusiast / weekend driving", max_price_usd=50000,
+            max_mileage=50000, min_seats=4, priorities=("Performance", "Safety")).contract(source.identity, 1)
+        context = RecommendationContext(source, requirements, {})
+        result = context.search()
+        self.assertEqual(result["retrieval"]["primary_sort"], "Advertised horsepower")
+        self.assertEqual(result["listings"][0]["candidate_id"], "listing:b")
+        self.assertEqual(result["listings"][0]["price"], 49000)
+        self.assertTrue(all(row["price"] <= 50000 for row in result["listings"]))
+
+    def test_unreviewed_or_undelivered_evidence_cannot_produce_ai_recommendations(self):
+        from car_app.agent import Conversation, AgentAnswer, RankedCandidate, run_turn
+        async def provider(c, inputs, config):
+            c.search()
+            return self.provider_result(AgentAnswer(message="Unreviewed winner", questions=[], cohorts=[], listings=[
+                RankedCandidate(candidate_id="listing:a", reason="Fits", tradeoff="Unknown", comparison="Leads", source_refs=["listing:a:facts"])]))
+        result = run_turn(self.source, self.requirements, 1, self.categories, "Recommend", [], {}, provider=provider)
+        self.assertEqual(result["telemetry"]["failure_category"], "invalid_response")
+        self.assertNotIn("Unreviewed winner", json.dumps(result))
+        c = Conversation(self.source, self.requirements, 1, self.categories, {})
+        c.search()
+        with patch("car_app.agent.MAX_CONTEXT_CHARS", 1):
+            with self.assertRaisesRegex(ValueError, "Context budget"):
+                self.review(c)
+        self.assertFalse(c.context.reviewed_ids)
+
+    def test_structured_safety_is_retrieved_without_text_bundle_and_unrated_stays_unknown(self):
+        from car_app.agent_context import evidence_for
+        row = self.source.catalog().filter(pl.col("vin") == "a").collect().to_dicts()[0]
+        evidence, _ = evidence_for(self.source, row, self.requirements, None)
+        self.assertEqual(evidence["safety"]["total_variants"], 1)
+        self.assertIsNone(evidence["safety"]["variants"][0]["OverallRating"])
+        self.assertEqual(evidence["nhtsa"]["status"], "unavailable")
+
+    def test_saved_champion_explanations_remain_accessible_when_live_inference_is_blocked(self):
+        from car_app.agent_context import saved_price_explanations, selected_price_models
+        candidates = pd.DataFrame([
+            {"model": "catboost", "run": "full/tree-full", "feature_set": "full", "validation_mae": 1},
+            {"model": "ridge", "run": "enhanced/linear-full", "feature_set": "enhanced", "validation_mae": 2}])
+        importance = pd.DataFrame({"feature": ["horsepower"], "value": [.1]})
+        importance.attrs.update(method="fixture explanation", scale="ln(price in USD)")
+        config = {"price_run_selection": {"runs": {"full": "full/tree-full"}}}
+        with patch("car_app.artifacts.diagnostic_inventory", return_value=(None, candidates, None, None)), \
+             patch("car_app.model_registry.validate_price_run", side_effect=ValueError("Code fingerprint differs")), \
+             patch("car_app.model_registry.read_json", return_value={}), \
+             patch("car_app.model_registry.digest", return_value="verified"), \
+             patch("car_app.artifacts.saved_shap", return_value=importance):
+            self.assertIsNone(selected_price_models(config)["tree"])
+            explanations = saved_price_explanations(config)
+            self.assertEqual(explanations["tree"]["global_features"][0]["feature"], "horsepower")
+            self.assertEqual(explanations["linear"]["model"], "ridge")
+
+    def test_invalid_ids_references_duplicates_and_provider_failure_use_valid_fallback(self):
+        from car_app.agent import AgentAnswer, RankedCandidate, run_turn
+        for failure in ("id", "reference", "duplicate", "provider", "units"):
+            with self.subTest(failure=failure):
+                async def provider(c, inputs, config):
+                    c.search()
+                    self.review(c)
+                    if failure == "provider":
+                        raise RuntimeError("private provider body must not appear")
+                    row = RankedCandidate(candidate_id="listing:invented" if failure == "id" else "listing:a",
+                        reason="20,000 miles" if failure == "units" else "Unvalidated model text must not appear",
+                        tradeoff="Condition is unverified.", comparison="Lower observed price.",
+                        source_refs=["invented"] if failure == "reference" else ["listing:a:facts"])
+                    return self.provider_result(AgentAnswer(message="Unvalidated model text must not appear", questions=[],
+                        listings=[row, row] if failure == "duplicate" else [row], cohorts=[]))
+                result = run_turn(self.source, self.requirements, 1, self.categories, "Show results", [], {}, provider=provider)
+                self.assertIsNotNone(result["telemetry"]["failure_category"])
+                self.assertEqual({r["candidate_id"] for r in result["answer"]["listings"]}, {"listing:a"})
+                self.assertNotIn("private provider body", json.dumps(result))
+                self.assertNotIn("Unvalidated model text", json.dumps(result))
+                self.assertNotIn("20,000 miles", json.dumps(result))
+
+    def test_preference_patch_is_atomic_grounded_and_does_not_infer_unknown_facts(self):
+        from car_app.agent import PreferenceChange, apply_changes
+        invalid = PreferenceChange(field="max_price_usd", operation="set", value=15000, statement="under $10,000")
+        with self.assertRaises(ValueError):
+            apply_changes(self.requirements, [invalid], "under $10,000", self.categories, self.source.identity, 1)
+        contradictory = [PreferenceChange(field="min_year", operation="set", value=2020, statement="2020 to 2010"),
+                         PreferenceChange(field="max_year", operation="set", value=2010, statement="2020 to 2010")]
+        with self.assertRaises(ValueError):
+            apply_changes(self.requirements, contradictory, "2020 to 2010", self.categories, self.source.identity, 1)
+        self.assertEqual(self.requirements["hard_requirements"], {"max_price_usd": 20000})
+        removed = apply_changes(self.requirements, [PreferenceChange(field="max_price_usd", operation="remove", value=None,
+            statement="remove budget")], "remove budget", self.categories, self.source.identity, 1)
+        self.assertNotIn("max_price_usd", removed["hard_requirements"])
+
+    def test_missing_key_deadline_and_changed_source_do_not_display_stale_ids(self):
+        from car_app.agent import AgentAnswer, Settings, run_turn
+        with patch("car_app.agent.settings", return_value=Settings("")), patch("car_app.agent._provider_run") as provider:
+            result = run_turn(self.source, self.requirements, 1, self.categories, "Show results", [], {})
+            provider.assert_not_called()
+            self.assertEqual(result["telemetry"]["failure_category"], "missing_credentials")
+            self.assertEqual(len(result["answer"]["listings"]), 1)
+        async def expired(c, inputs, config):
+            c.deadline = 0
+            c.check()
+        result = run_turn(self.source, self.requirements, 1, self.categories, "Show results", [], {}, provider=expired)
+        self.assertEqual(result["telemetry"]["failure_category"], "timeout")
+        async def changed(c, inputs, config):
+            c.search()
+            self.review(c)
+            path = self.source.directory / "used_cars.parquet"
+            frame = pl.read_parquet(path).with_columns(pl.lit(999999).alias("price"))
+            frame.write_parquet(path)
+            return self.provider_result(AgentAnswer(message="stale", questions=[], listings=[], cohorts=[]))
+        result = run_turn(self.source, self.requirements, 1, self.categories, "Show results", [], {}, provider=changed)
+        self.assertFalse(result["candidates"])
+        self.assertFalse(result["answer"]["listings"])
+
+    def test_price_family_selection_rejects_incompatible_and_unselected_models(self):
+        from car_app.agent_context import selected_price_models
+        candidates = pd.DataFrame([
+            {"model": "catboost", "run": "base/old-full", "feature_set": "base", "validation_mae": 1},
+            {"model": "ridge", "run": "enhanced/current-full", "feature_set": "enhanced", "validation_mae": 2},
+            {"model": "catboost", "run": "full/current-full", "feature_set": "full", "validation_mae": 3}])
+        config = {"price_run_selection": {"runs": {"full": "full/current-full"}},
+                  "active_price": {"run": "base/old-full", "model": "catboost"}}
+        def validate(path, model):
+            if "old-full" in str(path):
+                raise ValueError("Code fingerprint differs")
+        with patch("car_app.artifacts.diagnostic_inventory", return_value=(None, candidates, None, None)) as inventory, \
+             patch("car_app.model_registry.validate_price_run", side_effect=validate), \
+             patch("car_app.model_registry.digest", return_value="verified"):
+            models = selected_price_models(config)
+            inventory.assert_called_with(config["price_run_selection"])
+            self.assertEqual(models["primary"]["model"], "ridge")
+            self.assertEqual(models["tree"]["run"], "full/current-full")
+            self.assertTrue(models["unavailable"])
+            self.assertIsNone(selected_price_models({**config, "price_user_selected": True})["primary"])
+
+    def test_sdk_tools_are_strict_and_validate_user_statement_before_mutation(self):
+        import asyncio
+        from car_app.agent import Conversation, agent_tools
+        from agents.tool_context import ToolContext
+        from agents import RunConfig
+        c = Conversation(self.source, self.requirements, 1, self.categories, {})
+        c.user_message = "Make my budget $15,000"
+        tools = agent_tools(c)
+        self.assertTrue(all(t.strict_json_schema for t in tools))
+        tool = tools[0]
+        args = {"changes": [{"field": "max_price_usd", "operation": "set", "value": 15000,
+                             "statement": "budget $15,000"}]}
+        ctx = ToolContext(context=None, tool_name=tool.name, tool_call_id="fixture", tool_arguments=json.dumps(args),
+                          run_config=RunConfig(tracing_disabled=True))
+        result = json.loads(asyncio.run(tool.on_invoke_tool(ctx, json.dumps(args))))
+        self.assertEqual(result["hard_requirements"]["max_price_usd"], 15000)
+        result = json.loads(asyncio.run(tool.on_invoke_tool(ctx, json.dumps({"changes": [{**args["changes"][0], "value": 1}]}))))
+        self.assertIn("error", result)
+        self.assertEqual(c.requirements["hard_requirements"]["max_price_usd"], 15000)
+
+    def test_native_chat_submits_once_preserves_other_session_and_invalidates_reference(self):
+        from car_app.agent import AgentAnswer, run_turn
+        from car_app.agent_ui import sync_reference
+        async def provider(c, inputs, config):
+            return self.provider_result(AgentAnswer(message="What maximum advertised USD budget should we use?",
+                questions=["What is your budget?"], listings=[], cohorts=[]))
+        result = run_turn(self.source, {}, 0, self.categories, "Help me", [], {}, provider=provider)
+        script = '''import streamlit as st
+from car_app.agent_ui import render_chat
+from car_app.state import RecommendationPanel, SimilarityPanel
+from types import SimpleNamespace
+st.session_state.setdefault('independent', RecommendationPanel())
+st.session_state.setdefault('similar', SimilarityPanel())
+render_chat(st.session_state['independent'], SOURCE, {}, CATEGORIES, key='chat')
+'''
+        script = script.replace("SOURCE", f"SimpleNamespace(identity={self.source.identity!r})").replace("CATEGORIES", repr(self.categories))
+        with patch("car_app.agent_ui.run_turn", return_value=result) as called:
+            app = AppTest.from_string(script).run()
+            self.assertFalse(app.exception)
+            called.assert_not_called()
+            app.chat_input[0].set_value("Help me").run()
+            self.assertFalse(app.exception)
+            self.assertEqual(called.call_count, 1)
+            app.run()
+            self.assertEqual(called.call_count, 1)
+            self.assertFalse(app.session_state['similar'].messages)
+            self.assertTrue(app.get("download_button"))
+        panel = SimilarityPanel(messages=[{"role": "user", "content": "previous"}], chat_requirements={"previous": True}, agent_result=result)
+        sync_reference(panel, "new-reference")
+        self.assertFalse(panel.messages)
+        self.assertFalse(panel.chat_requirements)
+        self.assertIsNone(panel.agent_result)
+
+    def test_empty_v6_reference_scope_clears_previous_chat_reference(self):
+        from types import SimpleNamespace
+        catalog = SimpleNamespace(scope=lambda source, filters: pd.DataFrame({"identity_complete": pd.Series([], dtype=bool)}))
+        script = '''import streamlit as st
+from car_app.discovery import similarity_dashboard
+from car_app.data import Filters
+st.session_state['v6_similarity_reference'] = 'old-reference'
+similarity_dashboard(None, Filters())
+'''
+        with patch("car_app.discovery.active_catalog", return_value=catalog), patch("car_app.discovery.discovery_caption"):
+            app = AppTest.from_string(script).run()
+            self.assertFalse(app.exception)
+            self.assertNotIn("v6_similarity_reference", app.session_state)
+
+    def test_price_cache_preserves_usd_and_invalidates_on_model_or_source_change(self):
+        from car_app.agent_context import cached_estimates
+        cached_estimates.cache_clear()
+        self.addCleanup(cached_estimates.cache_clear)
+        receipt = json.dumps({"run": "enhanced/current-full", "model": "ridge", "metadata_sha256": "one"})
+        def predict(rows, config):
+            return rows.with_columns(pl.lit(15000.).alias("predicted_price_usd")), None
+        with patch("car_app.model_registry.price_estimates", side_effect=predict) as predicted:
+            self.assertEqual(cached_estimates(("a",), receipt, (("source", 1),)), (("a", 15000.),))
+            cached_estimates(("a",), receipt, (("source", 1),))
+            self.assertEqual(predicted.call_count, 1)
+            cached_estimates(("a",), receipt, (("source", 2),))
+            cached_estimates(("a",), receipt.replace('one', 'two'), (("source", 2),))
+            self.assertEqual(predicted.call_count, 3)
+
+    def test_local_price_button_updates_receipt_without_provider_call(self):
+        from copy import deepcopy
+        from car_app.agent import AgentAnswer, RankedCandidate, run_turn
+        async def provider(c, inputs, config):
+            c.search()
+            self.review(c)
+            return self.provider_result(AgentAnswer(message="Historical results", questions=[],
+                listings=[RankedCandidate(candidate_id="listing:a", reason="Catalog facts", tradeoff="Condition is unverified.", comparison="Fits the price priority.", source_refs=["listing:a:facts"])], cohorts=[]))
+        result = run_turn(self.source, self.requirements, 1, self.categories, "Show results", [], {}, provider=provider)
+        model = {"model": "ridge", "run": "enhanced/current-full", "feature_set": "enhanced", "validation_mae_usd": 1000}
+        result["artifacts"]["price_models"]["linear"] = model
+        updated = deepcopy(result)
+        updated["source_refs"]["listing:a:price_comparison"] = {"models": {"linear": {**model, "predicted_price_usd": 12000}}}
+        script = '''import streamlit as st
+from car_app.agent_ui import render_result
+from car_app.state import RecommendationPanel
+st.session_state.setdefault('panel', RecommendationPanel())
+render_result(RESULT, 'local', st.session_state['panel'], None, {})
+'''.replace("RESULT", repr(result))
+        with patch("car_app.agent_ui.load_price_comparisons", return_value=updated) as load, patch("car_app.agent._provider_run") as remote:
+            app = AppTest.from_string(script).run()
+            load.assert_not_called()
+            app.button(key="local_prices").click().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(load.call_count, 1)
+            remote.assert_not_called()
+            self.assertEqual(app.session_state['panel'].agent_result['source_refs']['listing:a:price_comparison']['models']['linear']['predicted_price_usd'], 12000)
+
+    def test_six_ai_cards_submit_once_and_sync_refined_preferences(self):
+        from car_app.agent import AgentAnswer, RankedCandidate, run_turn, PreferenceChange
+        from car_app.data import filter_options, query_snapshot
+        listings = pl.read_parquet(self.source.directory / "used_cars.parquet")
+        decoded = pl.read_parquet(self.source.directory / "NHTSA_vPIC.parquet")
+        for index in range(1, 8):
+            listings = pl.concat([listings, listings.head(1).with_columns(
+                pl.lit(f"extra{index}").alias("vin"), pl.lit(f"extra{index}").alias("listing_id"),
+                pl.lit(10000 + index * 1000).cast(pl.Int64).alias("price"))])
+            decoded = pl.concat([decoded, decoded.head(1).with_columns(
+                pl.lit(f"extra{index}").alias("vin"), pl.lit(f"Model {index}").alias("Model"))])
+        listings.write_parquet(self.source.directory / "used_cars.parquet")
+        decoded.write_parquet(self.source.directory / "NHTSA_vPIC.parquet")
+        self.source = Snapshot(self.source.directory)
+        self.requirements = QuestionDraft("Daily commute", max_price_usd=20000,
+            priorities=("Lower purchase price",)).contract(self.source.identity, 1)
+        async def provider(c, inputs, config):
+            if c.user_message == "Lower my budget to $15,000":
+                c.update([PreferenceChange(field="max_price_usd", operation="set", value=15000,
+                    statement="budget to $15,000")])
+            c.search()
+            self.review(c)
+            rows = list(c.context.listings.values())[:6]
+            return self.provider_result(AgentAnswer(message="Here are the AI-selected matches.", questions=[],
+                listings=[RankedCandidate(candidate_id=row["candidate_id"],
+                    reason=f"Observed price ${row['price']:,.0f} meets your budget and lower-price priority.",
+                    tradeoff="Vehicle condition is unverified.", comparison="Consider its observed price against your budget.",
+                    source_refs=[row["source_refs"][0]]) for row in rows], cohorts=[]))
+        result = run_turn(self.source, self.requirements, 1, self.categories, "Show recommendations", [], {}, provider=provider)
+        self.assertIsNone(result["telemetry"]["failure_category"])
+        self.assertEqual(len(result["answer"]["listings"]), 6)
+        self.assertEqual(len({result["candidates"][r["candidate_id"]]["Model"] for r in result["answer"]["listings"]}), 6)
+        filter_options.clear(); query_snapshot.clear()
+        self.addCleanup(filter_options.clear); self.addCleanup(query_snapshot.clear)
+        def request(*args, **kwargs):
+            return run_turn(*args, **kwargs, provider=provider)
+        with patch("car_app.data.snapshot", return_value=self.source), \
+             patch("car_app.data.MIN_MAKE_ROWS", 1), \
+             patch("car_app.model_registry.registry", return_value={}), \
+             patch("car_app.discovery.active_catalog", return_value=None), \
+             patch("car_app.artifacts.diagnostic_inventory", return_value=(None, pd.DataFrame(), None, None)), \
+             patch("car_app.agent_ui.run_turn", side_effect=request) as called, \
+             patch("car_app.agent._provider_run") as remote:
+            app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
+            app.session_state["rec_mileage_known"] = False
+            app.session_state["rec_mileage"] = 100000.
+            app.session_state["rec_seats_known"] = False
+            app.session_state["rec_seats"] = 5
+            app.switch_page("app_pages/recommendation.py").run()
+            called.assert_not_called()
+            self.assertIsNone(app.selectbox(key="rec_mileage").value)
+            self.assertIsNone(app.number_input(key="rec_seats").value)
+            app.selectbox(key="rec_budget").select("$20,000")
+            app.multiselect(key="rec_priorities").set_value(["Lower purchase price"])
+            app.multiselect(key="rec_bodies").set_value(["Sedan"])
+            app.selectbox(key="rec_mileage").set_value("50,000")
+            app.number_input(key="rec_seats").set_value(5)
+            app.button(key="recommendation_search").click().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(called.call_count, 1)
+            self.assertEqual(len(app.session_state['recommendation_session'].agent_result['answer']['listings']), 6)
+            self.assertEqual(sum(h.value.startswith("Best AI match:") for h in app.subheader), 1)
+            self.assertEqual(sum(h.value == "Other AI recommendations" for h in app.subheader), 1)
+            self.assertEqual(sum(m.value.startswith("**Main tradeoff:**") for m in app.markdown), 6)
+            app.run()
+            self.assertEqual(called.call_count, 1)
+            app.chat_input(key="recommendation_chat_input").set_value("Lower my budget to $15,000").run()
+            self.assertFalse(app.exception)
+            self.assertEqual(called.call_count, 2)
+            self.assertEqual(app.selectbox(key="rec_budget").value, "$15,000")
+            self.assertEqual(app.selectbox(key="rec_mileage").value, "50,000")
+            hard = app.session_state['recommendation_session'].requirements['hard_requirements']
+            self.assertEqual(hard['max_price_usd'], 15000)
+            self.assertEqual(hard['body_types'], ('Sedan',))
+            self.assertEqual(hard['min_seats'], 5)
+            self.assertEqual(hard['max_mileage'], 50000)
+            app.run()
+            self.assertEqual(called.call_count, 2)
+            remote.assert_not_called()
+
+    def test_slate_rejects_seventh_vehicle_duplicate_families_and_unexplained_tradeoffs(self):
+        from car_app.agent import Conversation, AgentAnswer, RankedCandidate
+        from types import SimpleNamespace
+        c = Conversation(self.source, self.requirements, 1, self.categories, {})
+        def candidate(cid, model):
+            return {"candidate_id": cid, "vin": cid, "Make": "TOYOTA", "Model": model, "source_refs": [cid + ":facts"]}
+        rows = {f"c{i}": candidate(f"c{i}", f"Model {i}") for i in range(7)}
+        c.context = SimpleNamespace(listings=rows, models=None)
+        def selection(cid, **kwargs):
+            return RankedCandidate(candidate_id=cid, reason="Meets the observed-price requirement.",
+                tradeoff="Condition is unknown.", comparison="Fits the primary priority.", source_refs=[cid + ":facts"], **kwargs)
+        with self.assertRaisesRegex(ValueError, "shortlist limits"):
+            c.validate(AgentAnswer(message="", questions=[], listings=[selection(cid) for cid in rows], cohorts=[]))
+        rows['c1']['Model'] = " model 0 "
+        with self.assertRaisesRegex(ValueError, "distinct Make/Model"):
+            c.validate(AgentAnswer(message="", questions=[], listings=[selection('c0'), selection('c1')], cohorts=[]))
+        with self.assertRaises(ValueError):
+            RankedCandidate(candidate_id='c0', reason='Fits', tradeoff='', comparison='Fits', source_refs=['c0:facts'])
+        from car_app.requirements import budget_amount
+        self.assertEqual(budget_amount("$18,000"), 18000)
+        self.assertEqual(budget_amount("18k"), 18000)
+        with self.assertRaises(ValueError):
+            budget_amount("$18,000 per month")
+
+    def test_cohort_evidence_keeps_family_scope_without_copying_member_cluster(self):
+        from car_app.agent_context import RecommendationContext
+        context = RecommendationContext(self.source, self.requirements, {})
+        context.search()
+        cid = next(iter(context.cohorts))
+        with patch("car_app.agent_context.evidence_for", return_value=({"specifications": {"cluster": "one member"},
+            "youtube": {"grain": "Make"}, "nhtsa": {"family_id": "2020/TOYOTA/COROLLA"}}, [])) as retrieve:
+            evidence = context.evidence([cid])[0]
+            self.assertEqual(retrieve.call_args.args[1]["vin"], "a")
+            self.assertNotIn("specifications", evidence)
+            self.assertIn("not trim-specific", evidence["applicability"])
+            self.assertIn(evidence["source_ref"], context.cohorts[cid]["source_refs"])
 
 
 if __name__ == "__main__":

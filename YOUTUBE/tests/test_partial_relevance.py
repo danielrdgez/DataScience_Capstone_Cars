@@ -1,7 +1,6 @@
 """Check annotation recovery, reviewed-range bounds, and blind isolation."""
 
 import csv
-import json
 import tempfile
 import unittest
 from pathlib import Path

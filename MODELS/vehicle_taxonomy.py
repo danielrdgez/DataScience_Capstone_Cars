@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import ast
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
 import hashlib
 import inspect
 import json
@@ -20,7 +19,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import polars as pl
-from sklearn.metrics import adjusted_rand_score, silhouette_score
+from sklearn.metrics import adjusted_rand_score
 
 from MODELS import vehicle_profiles as r
 from MODELS import vehicle_segmentation as s

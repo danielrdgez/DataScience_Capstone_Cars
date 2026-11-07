@@ -10,7 +10,6 @@ import ast
 import hashlib
 from importlib.metadata import version
 from dataclasses import asdict
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shutil

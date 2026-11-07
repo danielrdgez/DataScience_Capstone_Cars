@@ -15,6 +15,43 @@ NUMERIC = v2.NUMERIC + ["width"]
 EXTRA = ["engine_displacement", "engine_cylinders", "curb_weight_lb", "doors", "engine_hp_low", "engine_hp_high", "wheelbase_low", "wheelbase_high"]
 CATEGORICAL = v2.CATEGORICAL
 SOURCE_FIELDS = ["seating_source", "horsepower_source", "wheelbase_source", "displacement_source"]
+BODY_POLICY = "source_body_v2_listing_first"
+
+
+def reconcile_body(frame):
+    """Prefer the listing body, falling back to vPIC only for a missing label."""
+    def body_key(value):
+        return value.str.replace_all(r"[^A-Z0-9]", "")
+
+    aliases = {"".join(c for c in name if c.isalnum()): label for name, label in taxonomy.BODY.items()}
+    families = {label: taxonomy.body_family(label) for label in set(aliases.values())}
+    frame = frame.with_columns([
+        body_key(v2.canonical_expr(source)).replace_strict(aliases, default=None).alias(target)
+        for source, target in [("body_type", "listing_body"), ("BodyClass", "decoder_body")]])
+    listing, decoded = pl.col("listing_body"), pl.col("decoder_body")
+    listing_present = v2.canonical_expr("body_type").is_not_null()
+    decoded_present = v2.canonical_expr("BodyClass").is_not_null()
+    both = listing.is_not_null() & decoded.is_not_null()
+    detail_conflict = (both & listing.ne(decoded)).fill_null(False)
+    listing_family = listing.replace_strict(families, default=None)
+    decoded_family = decoded.replace_strict(families, default=None)
+    family_conflict = (both & listing_family.ne(decoded_family)).fill_null(False)
+    frame = frame.with_columns(
+        pl.when(listing_present).then(pl.coalesce(listing, pl.lit("unknown")))
+          .otherwise(pl.coalesce(decoded, pl.lit("unknown"))).alias("body_style"),
+        pl.when(listing_present).then(pl.lit("listing"))
+          .when(decoded_present).then(pl.lit("vpic"))
+          .otherwise(pl.lit("unknown")).alias("body_selected_source"),
+        detail_conflict.alias("body_detail_conflict"),
+        family_conflict.alias("body_family_conflict"),
+        pl.when(detail_conflict).then(pl.lit("listing_preferred"))
+          .when(both).then(pl.lit("agreed"))
+          .when(listing.is_not_null()).then(pl.lit("listing"))
+          .when(~listing_present & decoded.is_not_null()).then(pl.lit("vpic"))
+          .otherwise(pl.lit("unknown")).alias("body_resolution"))
+    return frame.with_columns(
+        pl.col("body_style").replace_strict(families, default="unknown").alias("body_family"),
+        pl.col("body_style").alias("body_partition"))
 
 
 def reconcile_displacement(frame):
@@ -138,11 +175,19 @@ def taxonomy_body(frame):
     return v2.body_expressions(frame)
 
 
-def aggregate(frame, grain):
+def aggregate(frame, grain, body_partitions=False):
     data = frame if grain == "cohort" else frame.with_columns(pl.lit(None, dtype=pl.String).alias("Trim"))
     data = data.with_columns(pl.col("cohort_complete" if grain == "cohort" else "model_complete").alias("identity_complete"))
     groups = [*r.COHORT, "identity_complete", "body_style", "powertrain"]
+    if body_partitions:
+        groups += ["body_partition", "body_family"]
     aggregations = [pl.len().alias("vin_count")]
+    if body_partitions:
+        aggregations.extend([
+            pl.col("body_resolution").unique().sort().str.join(";").alias("body_resolution_states"),
+            pl.col("body_detail_conflict").sum().alias("body_detail_conflict_n"),
+            pl.col("body_family_conflict").sum().alias("body_family_conflict_n"),
+            pl.col("body_resolution").eq("listing_preferred").sum().alias("body_listing_preferred_n")])
     for field in NUMERIC + EXTRA:
         value = pl.col(field).cast(pl.Float64, strict=False)
         value = pl.when(value.is_finite() & (value > 0)).then(value)
@@ -166,7 +211,8 @@ def aggregate(frame, grain):
     for field in CATEGORICAL + ["drive_family", "VehicleType", "powertrain_state", "drivetrain_state", *SOURCE_FIELDS]:
         profiles[field + "_agreement"] = profiles[field + "_mode_n"] / profiles[field + "_n"].replace(0, np.nan)
         profiles.loc[profiles[field + "_agreement"].lt(.9), field] = None
-    profiles["body_family"] = profiles.body_style.map(taxonomy.body_family)
+    if not body_partitions:
+        profiles["body_family"] = profiles.body_style.map(taxonomy.body_family)
     profiles.loc[profiles.powertrain.isin(["battery_electric", "fuel_cell"]), "engine_displacement"] = np.nan
     profiles.loc[profiles.powertrain.isin(["battery_electric", "fuel_cell"]), "engine_displacement_state"] = "not_applicable"
     crosswalk = r.read_json(v2.ASSETS / "identity_crosswalk.v2.json")["mappings"]

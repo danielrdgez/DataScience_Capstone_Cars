@@ -537,6 +537,8 @@ def load_youtube_features(directory):
     info = read_json(directory / "price_feature_manifest.json")
     if info["state"] != "complete" or info["attribution_scope"] != "explicit_comment" or info["window"] != "cumulative":
         raise ValueError("YouTube comparison needs a complete explicit-comment/cumulative price export.")
+    if info.get("sentiment_schema_version") != 2:
+        raise ValueError("YouTube sentiment v1 is retired; select a sentiment-v2 price export.")
     frame = pl.read_parquet(directory / "make_features.parquet")
     if price.file_sha256(directory / "make_features.parquet") != info["features_sha256"]:
         raise ValueError("Selected YouTube features changed after export.")
@@ -562,6 +564,13 @@ def join_youtube_features(listings, features):
     flags = [c for c in extra.columns if c.endswith("_missing") or c == "yt_support_suppressed"]
     extra = extra.with_columns(pl.col("yt_feature_row_present").fill_null(0),
                                *[pl.col(c).fill_null(True) for c in flags])
+    # Keep zero support distinct from unavailable evidence; never impute here.
+    for source, derived in price.YOUTUBE_LOG_COUNT_COLUMNS.items():
+        if source in extra.columns:
+            count = pl.col(source).cast(pl.Float64, strict=False)
+            extra = extra.with_columns(
+                pl.when(count.is_finite() & (count >= 0)).then(count.log1p())
+                .otherwise(None).alias(derived))
     return listings.hstack(extra)
 
 
@@ -656,9 +665,10 @@ def compare(args):
     if args.representation in groups:
         groups["nhtsa_text"] = groups[args.representation]
         if youtube_info:
-            coverage = youtube_info["feature_blocks"]["coverage"]
-            topics = youtube_info["feature_blocks"]["topics"]
-            sentiment = youtube_info["feature_blocks"]["sentiment"]
+            coverage, topics, sentiment = [
+                [price.YOUTUBE_LOG_COUNT_COLUMNS.get(c, c) for c in youtube_info["feature_blocks"][block]
+                 if c not in price.EXCLUDED_YOUTUBE_FEATURE_COLUMNS]
+                for block in ("coverage", "topics", "sentiment")]
             groups["nhtsa_text_youtube_coverage"] = groups["nhtsa_text"] + coverage
             groups["nhtsa_text_youtube_topics"] = groups["nhtsa_text"] + coverage + topics
             groups["nhtsa_text_youtube"] = groups["nhtsa_text"] + coverage + topics + sentiment
@@ -868,6 +878,10 @@ def run_full(args):
 
 
 def main():
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "vectors":
+        from NHTSA.discovery_text import main as vectors_main
+        return vectors_main(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     for command in ["prepare", "check-labels", "evaluate", "build", "compare", "run-full"]:
@@ -907,10 +921,10 @@ def main():
             child.add_argument("--vector-training-documents", type=int, default=100_000 if command == "run-full" else 20_000)
             child.add_argument("--embedding-model", type=Path)
             child.add_argument("--youtube-features", type=Path,
-                               default=ROOT / "YOUTUBE/outputs/price_features_v1" if command == "run-full" else None,
+                               default=price.YOUTUBE_FEATURE_DIRECTORY if command == "run-full" else None,
                                help="Frozen make export created with YOUTUBE.text_pipeline price-export.")
         if command == "run-full":
-            child.add_argument("--youtube-source-features", type=Path, default=ROOT / "YOUTUBE/outputs/text_features_v1")
+            child.add_argument("--youtube-source-features", type=Path, default=price.YOUTUBE_FEATURE_DIRECTORY.parent / "features")
             child.add_argument("--coverage-ablations", action="store_true",
                                help="Also isolate YouTube coverage and semantic/topic predictors from sentiment.")
     args = parser.parse_args()

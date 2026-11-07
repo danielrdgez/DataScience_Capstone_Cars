@@ -36,7 +36,11 @@ class Run:
                         "youtube_join_coverage.csv"}:
             raise ValueError("Unsupported report")
         file = self.path / name
-        return pd.read_csv(file) if file.is_file() and file.stat().st_size > 2 else pd.DataFrame()
+        try:
+            return pd.read_csv(file) if file.is_file() and file.stat().st_size > 2 else pd.DataFrame()
+        except (pd.errors.EmptyDataError, pd.errors.ParserError):
+            # CSV checkpoints are rewritten before metadata is published.
+            return pd.DataFrame()
 
     def prediction_path(self, model, partition="test"):
         if partition not in {"test", "validation"}:
@@ -170,7 +174,7 @@ def stat_key(path):
     return stat.st_size, stat.st_mtime_ns
 
 
-@st.cache_data(max_entries=16, ttl=900, show_spinner=False)
+@st.cache_data(max_entries=128, ttl=900, show_spinner=False)
 def hash_file(path: str, signature: tuple):
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -219,7 +223,7 @@ def saved_shap(run, model):
             if hash_file(str(predictor), stat_key(predictor)) != status.get("predictor_sha256"):
                 continue
             result = pd.read_csv(receipt.parent / "importance.csv")
-            result.attrs.update(method=status["method"], scale=status["scale"])
+            result.attrs.update(method=status["method"], scale=status["scale"], sample_rows=status.get("sample_rows"))
             return result
         except (OSError, ValueError, KeyError):
             continue
@@ -229,29 +233,155 @@ def saved_shap(run, model):
     return result
 
 
-def diagnostic_inventory():
-    """Discover the newest completed full-data checkpoint for each feature set and estimator."""
+def continuation_run(base, reference, policy, model=None):
+    """Find only the continuation command's matching full-data training run."""
+    original = json.loads((base / reference / "run_metadata.json").read_text(encoding="utf-8-sig"))
+    keys = ("raw_feature_columns", "source_file_sha256", "split_fingerprint",
+            "preprocessing_version", "package_versions", "tuning_rows", "max_trees",
+            "price_weighting", "split_strategy", "device_request", "full_validation")
+    for file in sorted((base / "full").glob("*-full/run_metadata.json"), reverse=True):
+        if file.parent.name <= policy["after"]:
+            continue
+        try:
+            metadata = json.loads(file.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        requested = set(metadata.get("requested_models", []))
+        expected_device = "cpu" if model == "lightgbm" else original.get("device_request")
+        matching_keys = [key for key in keys if model is None or key != "device_request"]
+        command_matches = (requested == set(policy["models"]) if model is None else
+                           model in requested and requested <= set(policy["models"]))
+        if (metadata.get("model_type") == "full"
+                and metadata.get("requested_sample_size") is None
+                and command_matches
+                and (model is None or metadata.get("device_request") == expected_device)
+                and (model != "lightgbm" or not policy.get("lightgbm_serialization")
+                     or metadata.get("lightgbm_serialization") == policy["lightgbm_serialization"])
+                and all(key in original and metadata.get(key) == original[key] for key in matching_keys)):
+            name = file.parent.relative_to(base).as_posix()
+            if model is not None:
+                # A newer unfinished retry must not hide an existing checkpoint.
+                _, choices, _, _ = diagnostic_inventory({"runs": {"full": name}, "models": [model]})
+                if choices.empty:
+                    continue
+            return name
+    return None
+
+
+def youtube_price_contract(root=ROOT):
+    """Bind the YouTube view to the configured Full runs, including pending fits."""
+    from car_app.data import youtube_feature_source
+
+    root = Path(root)
+    config = json.loads((root / "car_app/artifact_registry.json").read_text(encoding="utf-8-sig"))
+    selection = config.get("price_run_selection") or {}
+    reference = selection.get("runs", {}).get("full")
+    if not reference:
+        raise ValueError("No Full pricing run is selected")
+    base = root / "MODEL_OUTPUT"
+    path = (base / reference).resolve()
+    if path.parent != (base / "full").resolve() or not path.name.endswith("-full"):
+        raise ValueError("Invalid selected Full pricing run")
+    metadata = json.loads((path / "run_metadata.json").read_text(encoding="utf-8-sig"))
+    if metadata.get("model_type") != "full":
+        raise ValueError("Selected pricing receipt is not a Full model")
+    columns = [c for c in metadata["raw_feature_columns"] if c.startswith("yt_")]
+    if not columns or len(columns) != len(set(columns)):
+        raise ValueError("Full pricing receipt has missing or duplicate YouTube inputs")
+    runs = [reference]
+    policy = selection.get("full_continuation")
+    continuation = continuation_run(base, reference, policy) if policy else None
+    if continuation:
+        runs.append(continuation)
+    receipt = metadata.get("youtube_features") or {}
+    if not receipt.get("directory"):
+        raise ValueError("Full pricing receipt has no YouTube source directory")
+    directory = Path(receipt["directory"])
+    if not directory.is_absolute():
+        directory = root / directory
+    _, source, signature = youtube_feature_source(directory)
+    for key in ("manifest_sha256", "features_sha256", "as_of"):
+        if not receipt.get(key) or receipt[key] != source.get(key):
+            raise ValueError("YouTube source differs from the Full pricing receipt: " + key)
+    return {"directory": str(directory.resolve()), "columns": columns, "runs": runs,
+            "as_of": source["as_of"], "source_signature": signature}
+
+
+def diagnostic_inventory(selection=None):
+    """Read completed estimators from pinned runs, or discover latest runs when unconfigured."""
     from car_app.model_registry import VARIANTS
-    selected, inspected = {}, []
-    for variant in VARIANTS:
-        for file in sorted((ROOT / "MODEL_OUTPUT" / variant).glob("*-full/run_metadata.json")):
-            try:
-                metadata = json.loads(file.read_text(encoding="utf-8-sig"))
-                if metadata.get("requested_sample_size") is not None or metadata.get("model_type") != variant:
+    config = ROOT / "car_app/artifact_registry.json"
+    if selection is None and config.is_file():
+        selection = json.loads(config.read_text(encoding="utf-8-sig")).get("price_run_selection")
+    selected, inspected, statuses = {}, [], []
+    base = (ROOT / "MODEL_OUTPUT").resolve()
+    if selection is not None:
+        if not selection.get("runs") or not selection.get("models"):
+            raise ValueError("Price run selection requires explicit runs and estimators")
+        files = []
+        for variant, name in selection["runs"].items():
+            path = (base / name).resolve()
+            if variant not in VARIANTS or path.parent != base / variant or not path.name.endswith("-full"):
+                raise ValueError("Invalid selected price run: " + str(name))
+            policy = selection.get("full_continuation") if variant == "full" else None
+            if policy:
+                files.append((variant, path / "run_metadata.json", ["catboost"]))
+                groups = [[model] for model in policy["models"]] if policy.get("per_estimator") else [policy["models"]]
+                for models in groups:
+                    continuation = continuation_run(base, name, policy,
+                                                    models[0] if policy.get("per_estimator") else None)
+                    files.append((variant, base / continuation / "run_metadata.json" if continuation else None,
+                                  models))
+            else:
+                files.append((variant, path / "run_metadata.json", None))
+    else:
+        files = [(variant, file, None) for variant in VARIANTS
+                 for file in sorted((base / variant).glob("*-full/run_metadata.json"))]
+    for variant, file, run_models in files:
+        requested = run_models if run_models is not None else ([model for model in selection["models"] if model != "pcr" or variant == "full"] if selection else [])
+        if file is None:
+            statuses.extend({"feature_set": variant, "model": model, "run": "Awaiting matching Full continuation",
+                             "status": "pending", "run_status": "awaiting run"} for model in requested)
+            continue
+        run_name = file.parent.relative_to(base).as_posix()
+        pending = {model: {"feature_set": variant, "model": model, "run": run_name,
+                          "status": "pending", "run_status": "awaiting checkpoint"} for model in requested}
+        try:
+            if selection is not None and not file.is_file():
+                statuses.extend(pending.values())
+                continue
+            metadata = json.loads(file.read_text(encoding="utf-8-sig"))
+            if metadata.get("requested_sample_size") is not None or metadata.get("model_type") != variant:
+                raise ValueError("Selected run is not a full-data run for " + variant)
+            run = Run(file.parent, metadata)
+            scores = run.table("metrics.csv")
+            validation = run.table("validation_metrics.csv")
+            for row in pending.values():
+                row.update(run_status=metadata.get("status"), feature_count=len(metadata.get("raw_feature_columns", [])))
+                if metadata.get("status") == "failed":
+                    row["status"] = "unavailable after run failure"
+            for model, receipt in metadata.get("models", {}).items():
+                if selection is not None and model not in pending:
                     continue
-                run = Run(file.parent, metadata)
-                scores = run.table("metrics.csv")
-                if "model" not in scores:
-                    continue
-                for model, receipt in metadata.get("models", {}).items():
-                    required = [file.parent / model / "predictor.joblib",
-                                file.parent / f"{model}_test_predictions.parquet",
-                                file.parent / f"{model}_validation_predictions.parquet"]
-                    score = scores[scores.model.eq(model)]
-                    if receipt.get("status") == "completed" and not score.empty and all(p.is_file() for p in required):
-                        selected[variant, model] = (run, score.iloc[0])
-            except (OSError, ValueError, pd.errors.ParserError) as exc:
-                inspected.append({"run": str(file.parent), "reason": str(exc)})
+                required = [file.parent / model / "predictor.joblib",
+                            file.parent / f"{model}_test_predictions.parquet",
+                            file.parent / f"{model}_validation_predictions.parquet"]
+                score = scores[scores.model.eq(model)] if "model" in scores else pd.DataFrame()
+                ready = receipt.get("status") == "completed" and len(score) == 1 and all(p.is_file() for p in required)
+                if selection is not None:
+                    validation_score = validation[validation.model.eq(model)] if "model" in validation else pd.DataFrame()
+                    ready = (ready and len(validation_score) == 1
+                             and all(p.stat().st_size > 0 for p in required)
+                             and all(np.isfinite(float(score.iloc[0].get(metric, np.nan)))
+                                     for metric in ("mae", "rmse", "validation_mae")))
+                    pending[model]["status"] = "completed" if ready else "awaiting completed artifacts"
+                if ready:
+                    selected[variant, model] = (run, score.iloc[0])
+        except (OSError, ValueError, pd.errors.ParserError) as exc:
+            inspected.append({"run": run_name, "reason": str(exc)})
+            for row in pending.values():
+                row["status"] = "unavailable: " + str(exc)
+        statuses.extend(pending.values())
     runs, rows = {}, []
     for (variant, model), (run, score) in selected.items():
         runs[run.name] = run
@@ -260,4 +390,46 @@ def diagnostic_inventory():
                      "validation_mae": score.get("validation_mae"),
                      "test_mae": score.get("mae"), "test_rmse": score.get("rmse"),
                      "test_r2": score.get("r2")})
-    return runs, pd.DataFrame(rows), pd.DataFrame(rows), pd.DataFrame(inspected)
+    return runs, pd.DataFrame(rows), pd.DataFrame(statuses if selection is not None else rows), pd.DataFrame(inspected)
+
+
+def recommendation_inventory(config):
+    """Newest completed checkpoint per estimator in the AI's selected feature sets."""
+    policy = config.get("recommendation_price_selection")
+    if not policy:
+        return diagnostic_inventory(config.get("price_run_selection"))
+    from MODELS.Price_ML_Models import MODEL_FEATURE_SETS, PREPROCESSING_VERSION
+
+    variants = policy["feature_sets"]
+    if set(variants) - {"base", "enhanced", "full"}:
+        raise ValueError("AI price selection supports Base, Enhanced and Full")
+    allowed = [name for name in policy["models"] if name != "random_forest"]
+    runs, rows, statuses, ignored, seen = {}, [], [], [], set()
+    for variant in variants:
+        for file in sorted((ROOT / "MODEL_OUTPUT" / variant).glob("*-full/run_metadata.json"), reverse=True):
+            try:
+                metadata = json.loads(file.read_text(encoding="utf-8-sig"))
+                if (metadata.get("requested_sample_size") is not None
+                        or metadata.get("model_type") != variant
+                        or metadata.get("preprocessing_version") != PREPROCESSING_VERSION
+                        or metadata.get("raw_feature_columns") != list(MODEL_FEATURE_SETS[variant])):
+                    continue
+                selection = {"runs": {variant: file.parent.relative_to(ROOT / "MODEL_OUTPUT").as_posix()},
+                             "models": allowed}
+                found, candidates, _, rejected = diagnostic_inventory(selection)
+                ignored.extend(rejected.to_dict("records"))
+                for row in candidates.to_dict("records"):
+                    key = (variant, row["model"])
+                    if key not in seen:
+                        seen.add(key)
+                        rows.append(row)
+                        runs[row["run"]] = found[row["run"]]
+            except (OSError, ValueError, KeyError) as exc:
+                ignored.append({"run": str(file.parent), "reason": str(exc)})
+        for model in allowed:
+            if model == "pcr" and variant != "full":
+                continue
+            selected = next((row for row in rows if row["feature_set"] == variant and row["model"] == model), None)
+            statuses.append({"feature_set": variant, "model": model,
+                "run": selected["run"] if selected else None, "status": "completed" if selected else "pending"})
+    return runs, pd.DataFrame(rows), pd.DataFrame(statuses), pd.DataFrame(ignored)

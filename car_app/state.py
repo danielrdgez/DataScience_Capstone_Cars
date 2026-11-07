@@ -11,12 +11,18 @@ class RecommendationPanel:
     requirements: dict = field(default_factory=dict)
     result: dict | None = None
     artifact_identity: str | None = None
+    agent_result: dict | None = None
+    chat_requirements: dict = field(default_factory=dict)
+    chat_reference: str | None = None
+    request_id: str | None = None
 
 
 def update_result_context(panel, identity):
     if panel.artifact_identity != identity:
         panel.artifact_identity = identity
         panel.result = None
+        panel.agent_result = None
+        panel.request_id = None
 
 
 @dataclass
@@ -39,4 +45,7 @@ def update_dashboard_scope(state, filters: Filters, snapshot_identity: str):
         similarity.messages = []
         similarity.requirements = {}
         similarity.result = None
+        similarity.agent_result = None
+        similarity.chat_requirements = {}
+        similarity.request_id = None
     # The independent recommendation session is intentionally untouched.

@@ -1,0 +1,8 @@
+# Install into the existing CUDA-enabled .venv-youtube environment.
+-r requirements-app.txt
+sentence-transformers==5.7.0
+requests>=2.32
+beautifulsoup4>=4.12
+# The runner also exercises saved-model SHAP and notebook bootstrap regressions.
+shap>=0.45
+ipython>=8.0

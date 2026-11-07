@@ -33,6 +33,27 @@ def main():
     scoring.add_argument('--cache-dir', type=Path, default=ROOT/'YOUTUBE/.cache/huggingface')
     scoring.add_argument('--resume', action='store_true')
     scoring.add_argument('--keep-make-tokens', action='store_true', help='Identity sensitivity experiment; default masks canonical makes')
+    scoring.add_argument('--sentiment-policy', choices=['argmax', 'threshold'],
+                         help='Default: argmax for students; threshold for teacher training labels')
+    scoring.add_argument('--threshold', type=float, default=.75, help='Diagnostic confidence cutoff; argmax retains lower scores')
+    scoring.add_argument('--margin', type=float, default=.15)
+    scoring.add_argument('--calibration', type=Path, help='Optional lineage-matched sentiment_calibration.json')
+    relabel = sub.add_parser('relabel', help='Rebuild student sentiment decisions from cached scores without GPU inference')
+    relabel.add_argument('--score-dir', type=Path, required=True)
+    relabel.add_argument('--output-dir', type=Path, required=True)
+    relabel.add_argument('--policy', choices=['argmax', 'threshold'], default='argmax')
+    relabel.add_argument('--threshold', type=float, default=.75)
+    relabel.add_argument('--margin', type=float, default=.15)
+    relabel.add_argument('--calibration', type=Path)
+    relabel.add_argument('--resume', action='store_true')
+    evaluation = sub.add_parser('evaluate-sentiment', help='Compare decision coverage and fit validation-video temperature scaling')
+    evaluation.add_argument('--teacher-dir', type=Path, required=True)
+    evaluation.add_argument('--model-dir', type=Path, required=True)
+    evaluation.add_argument('--output-dir', type=Path, required=True)
+    evaluation.add_argument('--device', choices=['cpu', 'cuda'], default='cpu')
+    evaluation.add_argument('--batch-size', type=int, default=32)
+    evaluation.add_argument('--cpu-threads', type=int, default=4)
+    evaluation.add_argument('--review-csv', type=Path, help='Optional reviewed development predictions with human_label and reviewer')
     fitting = sub.add_parser('train', help='GPU fine-tune content and sentiment MiniLM students, fit training-only PCA')
     fitting.add_argument('--teacher-dir', type=Path, required=True)
     fitting.add_argument('--output-dir', type=Path, required=True)
@@ -57,6 +78,9 @@ def main():
     export = sub.add_parser('price-export', help='Select explicit-comment/cumulative make predictors for price comparisons')
     export.add_argument('--feature-dir', type=Path, required=True)
     export.add_argument('--output-dir', type=Path, required=True)
+    inspection = sub.add_parser('inspect', help='Print verified selected sentiment values and coverage')
+    inspection.add_argument('--price-dir', type=Path, required=True)
+    inspection.add_argument('--makes', nargs='+')
     args = vars(parser.parse_args()); command = args.pop('command')
     if command=='doctor':
         from YOUTUBE.text.neural import device_info
@@ -75,6 +99,9 @@ def main():
     elif command=='price-export':
         from YOUTUBE.text.features import export_price_features
         result = export_price_features(**args)
+    elif command in ('relabel', 'evaluate-sentiment', 'inspect'):
+        from YOUTUBE.text.sentiment import relabel, evaluate_sentiment, inspect_features
+        result = {'relabel': relabel, 'evaluate-sentiment': evaluate_sentiment, 'inspect': inspect_features}[command](**args)
     else:
         from YOUTUBE.text.features import aggregate
         result = aggregate(**args)

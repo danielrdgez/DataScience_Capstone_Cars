@@ -12,3 +12,9 @@ joblib==1.6.0
 catboost==1.2.10
 lightgbm==4.7.0
 xgboost==3.4.1
+
+# Optional conversational recommendation; model-training packages stay unchanged.
+openai-agents==0.24.0
+openai==3.45.0
+python-dotenv==1.2.4
+pydantic==2.14.0

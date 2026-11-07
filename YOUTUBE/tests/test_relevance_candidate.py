@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from YOUTUBE.relevance.partial_relevance import snapshot
-from YOUTUBE.relevance.prepare_relevance_round import FIELDS, SOURCE_FIELDS, file_hash, read_csv, write_json
+from YOUTUBE.relevance.prepare_relevance_round import SOURCE_FIELDS, file_hash, read_csv, write_json
 from YOUTUBE.relevance.relevance_candidate import (candidate_metadata, evaluate_blind, fit_candidate,
                                          read_json, reserved_video, score_pilot, validation_metrics, POLICY)
 from YOUTUBE.tests.test_partial_relevance import PartialRelevanceTest, replace_csv

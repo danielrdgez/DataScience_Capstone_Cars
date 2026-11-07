@@ -11,9 +11,31 @@ from YOUTUBE.sentiment.common import atomic_json, file_hash
 from YOUTUBE.text.data import canonical_matcher, duplicate_hash, evidence_rows, video_split
 from YOUTUBE.text.features import aggregate, collapse_polarities, export_price_features
 from YOUTUBE.text.training import training_rows
+from YOUTUBE.text.sentiment import annotate, decide, relabel, EXTRA_FEATURE_COLUMNS
 
 
 class RawTextPipelineTests(unittest.TestCase):
+    def test_argmax_keeps_uncertainty_without_copying_tone_to_aspects(self):
+        scores = dict(positive=.6232, negative=.2857, neutral=.0911)
+        d = decide(scores)
+        self.assertEqual(d['label'], 'positive')
+        self.assertFalse(d['confident'])
+        self.assertAlmostEqual(d['soft_net'], .3375)
+        self.assertAlmostEqual(d['margin'], .3375)
+        self.assertEqual(decide(scores, 'threshold')['label'], 'unresolved')
+        self.assertEqual(decide(scores, temperature=.5)['label'], 'positive')
+        self.assertAlmostEqual(decide(dict.fromkeys(('positive', 'neutral', 'negative'), .33333334))['entropy'], 1.)
+        with self.assertRaises(ValueError):
+            decide(dict(positive=2, negative=0, neutral=0))
+        row = dict(feature_eligible=True, content_label='vehicle_opinion', Make='SAAB',
+                   topics=['performance', 'reliability'], tone_scores_json=json.dumps(scores))
+        result = annotate(row)
+        self.assertEqual(result['overall_polarity'], 'positive')
+        self.assertEqual(result['polarity'], 'unresolved')
+        for flag in ('development_excluded', 'model_truncated', 'windowed', 'direct_price_mention'):
+            self.assertEqual(annotate(dict(row, **{flag: True}))['overall_polarity'], 'unresolved')
+        self.assertEqual(annotate(dict(row, content_label='vehicle_fact_question'))['overall_polarity'], 'unresolved')
+
     def test_attribution_offsets_and_competing_makes(self):
         matcher = canonical_matcher(['TOYOTA','NISSAN','MINI','RAM'])
         def clauses(text, title='Toyota review'):
@@ -99,6 +121,32 @@ class RawTextPipelineTests(unittest.TestCase):
             selected = pl.read_parquet(root/'price_suppressed/make_features.parquet')
             self.assertIsNone(selected['yt_semantic_01'][0])
             self.assertIsNone(selected['yt_comfort_video_balanced_net'][0])
+            # Reuse probabilities without neural inference; overall opinions can have multiple topics.
+            for row in rows:
+                row['tone_scores_json'] = (json.dumps(dict(positive=.6232, negative=.2857, neutral=.0911))
+                    if row['polarity']=='positive' else json.dumps(dict(positive=.30, negative=.52, neutral=.18)))
+            rows.append(dict(rows[0], comment_id='multi', video_id='c', normalized_text_sha256='multi',
+                             topics=['performance', 'reliability']))
+            pl.from_dicts(rows).write_parquet(scored/'predictions.parquet')
+            source = json.loads((scored/'score_manifest.json').read_text())
+            source['shards']['predictions.parquet'] = file_hash(scored/'predictions.parquet')
+            source['config']['train_sha256'] = file_hash(model/'train_manifest.json')
+            atomic_json(scored/'score_manifest.json', source)
+            relabel(scored, root/'argmax')
+            aggregate(root/'argmax',model,root/'v2','2020-12-31',min_comments=2,min_videos=2)
+            export_price_features(root/'v2', root/'price_v2')
+            selected = pl.read_parquet(root/'price_v2/make_features.parquet')
+            self.assertEqual(len(selected.columns), 76)
+            self.assertTrue(set(EXTRA_FEATURE_COLUMNS) <= set(selected.columns))
+            self.assertAlmostEqual(selected['yt_overall_video_balanced_net'][0], 1/3)
+            self.assertEqual(selected['yt_overall_opinion_count'][0], 6)
+            self.assertEqual(selected['yt_comfort_opinion_count'][0], 5)
+            self.assertAlmostEqual(selected['yt_comfort_video_balanced_soft_net'][0], (.3375-.22)/2)
+            self.assertEqual(selected['yt_overall_low_confidence_share'][0], 1.)
+            self.assertIsNone(selected['yt_reliability_video_balanced_soft_net'][0])
+            relabel(scored, root/'argmax', resume=True)
+            with self.assertRaisesRegex(ValueError, 'Resume'):
+                relabel(scored, root/'argmax', policy='threshold', resume=True)
             changed = pl.read_parquet(root/'features/youtube_text_make_features_wide.parquet')
             pl.concat([changed, changed]).write_parquet(root/'features/youtube_text_make_features_wide.parquet')
             with self.assertRaisesRegex(ValueError, 'changed'):

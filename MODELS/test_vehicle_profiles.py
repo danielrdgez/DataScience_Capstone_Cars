@@ -1367,5 +1367,143 @@ class CategoryHierarchyTests(unittest.TestCase):
             self.assertTrue(set(predictions.profile_id).issubset(set(data.profile_id[-2:])))
 
 
+class DiscoveryV6Tests(unittest.TestCase):
+    def test_source_body_reconciliation_prefers_listing_and_preserves_conflict_flags(self):
+        from MODELS.vehicle_profiles_v5 import reconcile_body
+        from MODELS.vehicle_similarity_v6 import body_category
+        frame = pl.DataFrame({
+            "body_type": ["", "Sedan", "Van", "SUV / Crossover", "Pickup Truck", None, "Convertible", "Sedan"],
+            "BodyClass": ["Sport Utility Vehicle [SUV]/Multipurpose Vehicle [MPV]", "Coupe", "Minivan",
+                          "Hatchback/Liftback/Notchback", "Truck", "Incomplete - Chassis Cab (Single Cab)",
+                          "Convertible/Cabriolet", " sedan / saloon "]})
+        result = reconcile_body(frame)
+        self.assertEqual(result.select(frame.columns).to_dicts(), frame.to_dicts())
+        self.assertEqual(result["body_style"].to_list(),
+                         ["suv_crossover", "sedan", "van", "suv_crossover", "pickup", "unknown", "convertible", "sedan"])
+        self.assertEqual(result["body_partition"].to_list(), result["body_style"].to_list())
+        self.assertEqual(result["body_resolution"].to_list(),
+                         ["vpic", "listing_preferred", "listing_preferred", "listing_preferred", "listing", "unknown", "agreed", "agreed"])
+        self.assertEqual(result["body_detail_conflict"].to_list(), [False, True, True, True, False, False, False, False])
+        self.assertEqual(result["body_family_conflict"].to_list(), [False, False, False, True, False, False, False, False])
+        fallback = reconcile_body(pl.DataFrame({"body_type": [None, "", "  ", "UNKNOWN", "N/A", "Unmapped listing label"],
+                                               "BodyClass": ["Sedan/Saloon"] * 6}))
+        self.assertEqual(fallback["body_style"].to_list(), ["sedan"] * 5 + ["unknown"])
+        self.assertEqual(fallback["body_selected_source"].to_list(), ["vpic"] * 5 + ["listing"])
+        self.assertEqual(fallback["body_resolution"].to_list(), ["vpic"] * 5 + ["unknown"])
+        self.assertEqual(body_category("passenger_car"), "Passenger car (style unresolved)")
+        self.assertEqual(body_category("van_minivan"), "Van")
+
+    def test_source_body_preparation_reconciles_memberships_and_retains_audit(self):
+        from MODELS import vehicle_similarity_v6 as discovery
+        from MODELS import vehicle_similarity_v3 as similarity
+        from MODELS import vehicle_profiles_v5 as profiles
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            CategoryWorkflowControls.snapshot(root / "data", 3)
+            listing_path, decode_path = root / "data/used_cars.parquet", root / "data/NHTSA_vPIC.parquet"
+            listings, decodes = pd.read_parquet(listing_path), pd.read_parquet(decode_path)
+            for field, value in {"VehicleType": "PASSENGER CAR", "DriveType": "FWD", "Seats": 5,
+                                 "EngineCylinders": 4, "EngineHP_to": None, "WheelBaseShort": 100.,
+                                 "WheelBaseLong": 100.}.items():
+                decodes[field] = value
+            decodes.loc[decodes.Model.eq("MODEL0"), "BodyClass"] = "Coupe"
+            decodes.loc[decodes.index[:3], "BodyClass"] = "Sedan/Saloon"
+            decodes.loc[decodes.Model.eq("MODEL1"), "BodyClass"] = "Sedan/Saloon"
+            decodes.loc[decodes.Model.eq("MODEL2"), "BodyClass"] = "Sport Utility Vehicle [SUV]/Multipurpose Vehicle [MPV]"
+            listings.loc[listings.vin.str.startswith("synthetic-2-"), "body_type"] = ""
+            listings.to_parquet(listing_path, index=False)
+            decodes.to_parquet(decode_path, index=False)
+            for name in ("NHTSA_Complaints", "NHTSA_Recalls", "NHTSA_Safety"):
+                pl.DataFrame({"unused": [1]}).write_parquet(root / "data" / (name + ".parquet"))
+            before = discovery.a.source_hashes(root / "data")
+            discovery.prepare(root / "data", root / "prepared")
+            self.assertEqual(before, discovery.a.source_hashes(root / "data"))
+            evidence = pd.read_parquet(root / "prepared/body_evidence.parquet")
+            self.assertEqual(len(evidence), 36)
+            self.assertFalse(evidence.vin.duplicated().any())
+            self.assertEqual(int(pd.read_csv(root / "prepared/body_reconciliation.csv").listings.sum()), 36)
+            self.assertEqual(discovery.a.read_json(root / "prepared/manifest.json")["configuration"]["body_policy"], profiles.BODY_POLICY)
+            coverage = pd.read_csv(root / "prepared/coverage.csv")
+            for grain in ("model", "cohort"):
+                data = pd.read_parquet(root / "prepared" / grain / "profiles.parquet")
+                members = pd.read_parquet(root / "prepared" / grain / "memberships.parquet")
+                self.assertEqual(len(members), 36)
+                self.assertEqual(members.vin.nunique(), 36)
+                self.assertEqual(set(members.profile_id), set(data.profile_id))
+                self.assertEqual(int(data.vin_count.sum()), 36)
+                local = coverage.loc[coverage.grain.eq(grain)].set_index("reason")
+                self.assertEqual(int(local.loc["body_unresolved", "listings"]), 0)
+                self.assertEqual(int(local.loc["body_broad_only", "listings"]), 0)
+                self.assertEqual(int(local.loc["body_listing_preferred", "listings"]), 21)
+                self.assertEqual(int(local.loc["body_style_conflicting", "listings"]), 21)
+                self.assertEqual(int(local.loc["body_source_conflicting", "listings"]), 12)
+                selected = data.loc[data.Model.eq("MODEL0")]
+                self.assertTrue(selected.body_style.eq("sedan").all())
+                self.assertTrue(selected.body_family.eq("passenger_car").all())
+                self.assertTrue(selected.body_resolution_states.str.contains("listing_preferred").all())
+                self.assertEqual(int(selected.body_detail_conflict_n.sum()), 9)
+                self.assertTrue(data.loc[data.Model.eq("MODEL1"), "body_style"].eq("suv_crossover").all())
+                eligible = similarity.eligible(data, ["seating", "length", "fuel_type"])
+                self.assertTrue(eligible.loc[data.Model.eq("MODEL0")].all())
+                self.assertTrue(eligible.loc[data.Model.eq("MODEL1")].all())
+                self.assertTrue(eligible.loc[data.Model.eq("MODEL2")].all())
+            discovery.fit_specs(root / "prepared", root / "specs", smoke=True)
+            for grain in ("model", "cohort"):
+                contexts = [discovery.a.read_json(path)["category"] for path in (root / "specs" / grain / "contexts").glob("*/manifest.json")]
+                self.assertIn("Sedan", contexts)
+                self.assertIn("SUV / crossover", contexts)
+                self.assertNotIn("Passenger car (style unresolved)", contexts)
+                self.assertNotIn("Body unresolved", contexts)
+
+    def test_family_folds_keep_years_and_preserve_alias_blocks(self):
+        from MODELS.discovery_artifacts import normalize_families
+        frame = pd.DataFrame({"ModelYear": [2014, 2018], "Make": [" Make ", "MAKE"],
+                              "Model": ["Model A", "MODEL A"], "family_block": ["reviewed-alias", "reviewed-alias"]})
+        result = normalize_families(frame)
+        self.assertEqual(result.family_block.nunique(), 1)
+        self.assertEqual(result.fold.nunique(), 1)
+        self.assertEqual(result.family_id.nunique(), 2)
+        self.assertEqual(result.Make.tolist(), ["MAKE", "MAKE"])
+
+    def test_projection_fit_ignores_held_out_values_and_keeps_missing_unplotted(self):
+        from MODELS.discovery_artifacts import project
+        import joblib
+        values = np.random.default_rng(42).normal(size=(40, 3))
+        mask = np.arange(40) < 30
+        changed = values.copy()
+        changed[30:] *= 100
+        changed[-1] = np.nan
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory) / "first", Path(directory) / "second"
+            project(first, values, np.arange(40), mask.copy(), names=["a", "b", "c"], standardize=True)
+            project(second, changed, np.arange(40), mask.copy(), names=["a", "b", "c"], standardize=True)
+            left = joblib.load(first / "projection.joblib")
+            right = joblib.load(second / "projection.joblib")
+            np.testing.assert_allclose(left["reducer"].components_, right["reducer"].components_)
+            self.assertNotIn(39, pd.read_parquet(second / "points.parquet").entity_id.tolist())
+
+    def test_empty_projection_is_explicit_and_has_no_invented_locations(self):
+        from MODELS.discovery_artifacts import project, read_json
+        with tempfile.TemporaryDirectory() as directory:
+            project(directory, np.empty((0, 0)), [], [])
+            self.assertEqual(read_json(Path(directory) / "projection.json")["status"], "insufficient_support")
+            self.assertTrue(pd.read_parquet(Path(directory) / "points.parquet").empty)
+
+    def test_projection_accepts_read_only_mask_without_mutating_it(self):
+        from MODELS.discovery_artifacts import project, read_json
+        values = np.random.default_rng(42).normal(size=(12, 3))
+        values[0] = np.nan
+        mask = np.arange(12) < 8
+        original = mask.copy()
+        mask.setflags(write=False)
+        with tempfile.TemporaryDirectory() as directory:
+            project(directory, values, np.arange(12), mask, names=["a", "b", "c"], standardize=True)
+            metadata = read_json(Path(directory) / "projection.json")
+            self.assertEqual(metadata["status"], "completed")
+            self.assertEqual(metadata["fit_entities"], [str(i) for i in range(1, 8)])
+        np.testing.assert_array_equal(mask, original)
+        self.assertFalse(mask.flags.writeable)
+
+
 if __name__ == "__main__":
     unittest.main()

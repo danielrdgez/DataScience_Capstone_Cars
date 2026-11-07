@@ -69,8 +69,9 @@ def family_fold(family, folds=5):
 
 
 def eligible(frame, fields):
+    body = frame["body_partition"] if "body_partition" in frame else frame.body_style
     valid = (frame.identity_complete & frame.vin_count.ge(5)
-             & ~frame.body_style.isin(["unknown", "conflicting"])
+             & ~body.isin(["unknown", "conflicting"])
              & ~frame.powertrain.eq("conflicting"))
     for block, minimum in [("size", 2), ("powertrain", 1)]:
         selected = [f for f in fields if v2.feature_block(f) == block]

@@ -12,6 +12,7 @@ import polars as pl
 
 from YOUTUBE.sentiment.common import atomic_json, cutoff_date, file_hash, load_json, new_dir, utc_now
 from .data import SENTIMENT_ASPECTS, TOPICS, implementation_hashes, verified_manifest
+from .sentiment import EXTRA_FEATURE_COLUMNS, UNCERTAINTY_SUFFIXES, V2_GROUPS
 
 
 def collapse_polarities(values):
@@ -45,6 +46,9 @@ def export_price_features(feature_dir, output_dir):
     topics = [f'yt_semantic_{i:02d}' for i in range(1, 9)] + [f'yt_{aspect}_mention_share' for aspect in TOPICS]
     sentiment = [f'yt_{aspect}_{suffix}' for aspect in sorted(SENTIMENT_ASPECTS)
                  for suffix in ('video_balanced_net', 'opinion_count', 'opinion_video_count', 'missing')]
+    extended = manifest.get('sentiment_schema_version') == 2
+    if extended:
+        sentiment += list(EXTRA_FEATURE_COLUMNS)
     missing = set(coverage + topics + sentiment) - set(selected.columns)
     if missing:
         raise ValueError('Missing YouTube features: ' + ', '.join(sorted(missing)))
@@ -52,7 +56,7 @@ def export_price_features(feature_dir, output_dir):
     if any(suppressed[c].drop_nulls().len() for c in topics):
         raise ValueError('Unsupported topic/semantic measurements must remain null')
     profile = {}
-    for aspect in sorted(SENTIMENT_ASPECTS):
+    for aspect in (V2_GROUPS if extended else sorted(SENTIMENT_ASPECTS)):
         column = f'yt_{aspect}_video_balanced_net'
         values = selected[column].cast(pl.Float64).drop_nulls()
         if values.filter(~values.is_finite() | (values.abs() > 1)).len():
@@ -61,7 +65,18 @@ def export_price_features(feature_dir, output_dir):
             raise ValueError('Unsupported sentiment must remain null')
         profile[aspect] = {'populated_makes': len(values), 'distinct_scores': values.n_unique(),
                            'nonzero_scores': int((values != 0).sum())}
-    usable_sentiment = any(v['distinct_scores'] > 1 for v in profile.values())
+        if extended:
+            for suffix in UNCERTAINTY_SUFFIXES:
+                c = f'yt_{aspect}_{suffix}'; v = selected[c].drop_nulls().cast(pl.Float64)
+                lower = -1 if suffix == 'video_balanced_soft_net' else 0
+                if v.filter(~v.is_finite() | (v < lower) | (v > 1)).len():
+                    raise ValueError('Invalid sentiment measurement: '+c)
+                if selected.filter(pl.col(f'yt_{aspect}_missing'))[c].drop_nulls().len():
+                    raise ValueError('Unsupported sentiment measurements must remain null')
+            soft = selected[f'yt_{aspect}_video_balanced_soft_net'].cast(pl.Float64).drop_nulls()
+            profile[aspect]['soft_distinct_scores'] = soft.n_unique()
+            profile[aspect]['soft_nonzero_scores'] = int((soft != 0).sum())
+    usable_sentiment = any(v['distinct_scores'] > 1 or v.get('soft_distinct_scores', 0) > 1 for v in profile.values())
     selected = selected.select('Make', *coverage, *topics, *sentiment).with_columns(
         pl.lit(1, dtype=pl.Int8).alias('yt_feature_row_present')).sort('Make')
     coverage = ['yt_feature_row_present', *coverage]
@@ -75,6 +90,11 @@ def export_price_features(feature_dir, output_dir):
                   features_sha256=file_hash(output_dir/'make_features.parquet'),
                   validation_status=manifest['validation_status'], interpretation='retrospective_association',
                   feature_blocks=dict(coverage=coverage, topics=topics, sentiment=sentiment),
+                  sentiment_schema_version=2 if extended else 1,
+                  sentiment_policy=manifest.get('sentiment_policy', 'threshold'),
+                  sentiment_temperature=manifest.get('sentiment_temperature', 1.),
+                  score_calibration=manifest.get('score_calibration', 'uncalibrated'),
+                  calibration_label_source=manifest.get('calibration_label_source'),
                   sentiment_profile=profile, directional_sentiment_available=usable_sentiment,
                   sentiment_limitation=None if usable_sentiment else
                       'Selected sentiment is constant or missing; this snapshot cannot demonstrate a directional sentiment effect.',
@@ -83,7 +103,7 @@ def export_price_features(feature_dir, output_dir):
     return result
 
 
-def target_comments(rows, mean, components):
+def target_comments(rows, mean, components, extended=False):
     """One comment per make/scope; each topic/opinion is counted at most once."""
     grouped = defaultdict(list)
     for row in rows:
@@ -100,11 +120,25 @@ def target_comments(rows, mean, components):
                     polarities[aspect].append(row['polarity'])
         vectors = [np.asarray(r['embedding'], dtype=np.float32) for r in eligible if r['embedding'] is not None]
         semantic = ((np.mean(vectors,axis=0)-mean) @ components.T).tolist() if vectors else None
+        sentiment = {}
+        if extended:
+            for aspect in V2_GROUPS:
+                evidence = [r for r in eligible if r['content_label'] == 'vehicle_opinion' and
+                            (aspect == 'overall' or aspect in r['topics'])]
+                if not evidence:
+                    continue
+                label = collapse_polarities([r['overall_polarity'] if aspect == 'overall' else r['polarity']
+                                             for r in evidence])
+                valid = label != 'unresolved' and all(r.get('sentiment_soft_net') is not None for r in evidence)
+                sentiment[aspect] = dict(polarity=label, **{
+                    k: float(np.mean([r['sentiment_'+k] for r in evidence])) if valid else None
+                    for k in ('soft_net', 'confidence', 'margin', 'entropy')},
+                    low_confidence=float(any(not r['sentiment_confident'] for r in evidence)) if valid else None)
         yield (cid, first['video_id'], make, scope, first['published_date'], first['updated_date'],
                first['normalized_text_sha256'], int(bool(eligible)), json.dumps(topics),
                json.dumps({k:collapse_polarities(v) for k,v in polarities.items()}),
                json.dumps(semantic) if semantic else None, first['language_status'],
-               int(any(r['model_truncated'] or r['windowed'] for r in clauses)))
+               int(any(r['model_truncated'] or r['windowed'] for r in clauses)), json.dumps(sentiment))
 
 
 def aggregate(score_dir, model_dir, output_dir, as_of, min_comments=20, min_videos=5,
@@ -113,6 +147,7 @@ def aggregate(score_dir, model_dir, output_dir, as_of, min_comments=20, min_vide
     if min_comments<1 or min_videos<1:
         raise ValueError('Support minimums must be positive')
     scores = verified_manifest(score_dir, 'score_manifest.json')
+    extended = scores['config'].get('sentiment_schema_version') == 2
     model = load_json(model_dir/'train_manifest.json')
     if model['state']!='complete':
         raise ValueError('Reducer training is incomplete')
@@ -123,6 +158,8 @@ def aggregate(score_dir, model_dir, output_dir, as_of, min_comments=20, min_vide
         raise ValueError('Reducer/source/embedding lineage differs')
     if model['mask_makes']!=scores['config']['mask_makes']:
         raise ValueError('Embedding make masking differs from the trained reducer')
+    if scores['config'].get('train_sha256') and scores['config']['train_sha256'] != file_hash(model_dir/'train_manifest.json'):
+        raise ValueError('Scores and reducer/student training manifest differ')
     cutoff = cutoff_date(as_of).date()
     if cutoff.isoformat()<model['as_of']:
         raise ValueError('Reducer/students were fitted on text later than this cutoff')
@@ -135,16 +172,16 @@ def aggregate(score_dir, model_dir, output_dir, as_of, min_comments=20, min_vide
     connection.execute('''CREATE TABLE comments (
         id TEXT, video TEXT, make TEXT, scope TEXT, published TEXT, updated TEXT,
         text_hash TEXT, eligible INTEGER, topics TEXT, polarities TEXT, semantic TEXT,
-        language TEXT, truncated INTEGER, PRIMARY KEY (id,make,scope))''')
+        language TEXT, truncated INTEGER, sentiment TEXT, PRIMARY KEY (id,make,scope))''')
     audit = Counter()
     for path in sorted(scores['shards']):
         frame = pl.read_parquet(score_dir/path)
         audit['scored_clauses'] += len(frame)
         audit['development_excluded_clauses'] += frame['development_excluded'].sum()
         audit['unresolved_target_clauses'] += frame['Make'].null_count()
-        records = list(target_comments(frame.to_dicts(), mean, components))
+        records = list(target_comments(frame.to_dicts(), mean, components, extended))
         # Duplicate IDs from different input shards are a source error, never silently multiplied.
-        connection.executemany('INSERT INTO comments VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', records)
+        connection.executemany('INSERT INTO comments VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', records)
         connection.commit()
     connection.execute('CREATE INDEX group_time ON comments(make,scope,published,updated,video,text_hash)')
     if exclude_cross_video_repeats:
@@ -152,7 +189,7 @@ def aggregate(score_dir, model_dir, output_dir, as_of, min_comments=20, min_vide
         connection.execute('CREATE INDEX repeat_keys ON repeats(make,scope,text_hash)')
     groups = connection.execute('SELECT DISTINCT make,scope FROM comments ORDER BY make,scope').fetchall()
     video_output, long_output, wide_output = [], [], []
-    method = 'minilm_topics_'+scores['config']['backend']+'_distillation_v1'
+    method = 'minilm_topics_'+scores['config']['backend']+('_sentiment_v2' if extended else '_distillation_v1')
     try:
         trailing_start = cutoff.replace(year=cutoff.year-1)+timedelta(days=1)
     except ValueError:
@@ -165,9 +202,9 @@ def aggregate(score_dir, model_dir, output_dir, as_of, min_comments=20, min_vide
                 ORDER BY video,id''', (make,scope,start_date,cutoff.isoformat(),cutoff.isoformat()))
             per_video = {}
             for record in cursor:
-                cid, vid, _, _, published, updated, digest, eligible, topics, polarities, semantic, language, truncated, duplicate_rank = record
+                cid, vid, _, _, published, updated, digest, eligible, topics, polarities, semantic, language, truncated, sentiment, duplicate_rank = record
                 stats = per_video.setdefault(vid, dict(raw=0, duplicates=0, comments=0, eligible=0, topics=Counter(),
-                            polarities=defaultdict(Counter), vector_sum=np.zeros(8), vectors=0,
+                            polarities=defaultdict(Counter), sentiment=defaultdict(list), vector_sum=np.zeros(8), vectors=0,
                             language_unknown=0, truncations=0))
                 stats['raw'] += 1
                 if duplicate_rank>1:
@@ -177,6 +214,11 @@ def aggregate(score_dir, model_dir, output_dir, as_of, min_comments=20, min_vide
                 stats['topics'].update(json.loads(topics))
                 for aspect, polarity in json.loads(polarities).items():
                     stats['polarities'][aspect][polarity] += 1
+                for aspect, values in json.loads(sentiment).items():
+                    if aspect == 'overall':
+                        stats['polarities'][aspect][values['polarity']] += 1
+                    if values['soft_net'] is not None:
+                        stats['sentiment'][aspect].append(values)
                 if semantic:
                     stats['vector_sum'] += np.asarray(json.loads(semantic)); stats['vectors'] += 1
                 stats['language_unknown'] += language not in ('en','short_en_rule')
@@ -201,8 +243,9 @@ def aggregate(score_dir, model_dir, output_dir, as_of, min_comments=20, min_vide
             for index in range(8):
                 wide[f'yt_semantic_{index+1:02d}'] = None if suppressed else float(semantic[index])
             wide['yt_semantic_missing'] = suppressed
-            for aspect in TOPICS:
-                mention_share = float(np.mean([v['topics'][aspect]/v['eligible'] for v in eligible_videos])) if eligible_videos else None
+            for aspect in [*TOPICS, *(['overall'] if extended else [])]:
+                mention_share = (float(np.mean([v['topics'][aspect]/v['eligible'] for v in eligible_videos]))
+                                 if eligible_videos and aspect != 'overall' else None)
                 opinions = Counter()
                 nets, opinion_videos = [], 0
                 for vid, video in per_video.items():
@@ -213,13 +256,13 @@ def aggregate(score_dir, model_dir, output_dir, as_of, min_comments=20, min_vide
                     if net is not None:
                         nets.append(net); opinion_videos += 1
                     video_output.append(dict(base, video_id=vid, aspect=aspect, eligible_count=video['eligible'],
-                                    mention_count=video['topics'][aspect], opinion_count=denominator,
+                                    mention_count=video['topics'][aspect] if aspect != 'overall' else None, opinion_count=denominator,
                                     unresolved_opinion_count=counts['unresolved'], net_sentiment=net,
                                     raw_comment_count=video['raw'], duplicate_count=video['duplicates']))
                 denominator = sum(opinions[k] for k in ['positive','negative','neutral','mixed'])
                 sentiment_suppressed = denominator<min_comments or opinion_videos<min_videos
                 net = float(np.mean(nets)) if nets and not sentiment_suppressed else None
-                total_mentioned = sum(v['topics'][aspect] for v in videos)
+                total_mentioned = sum(v['topics'][aspect] for v in videos) if aspect != 'overall' else None
                 long_output.append(dict(base, aspect=aspect, eligible_count=eligible_count, eligible_video_count=len(eligible_videos),
                             mention_count=total_mentioned, mention_share=None if suppressed else mention_share,
                             opinion_count=denominator, opinion_video_count=opinion_videos,
@@ -230,13 +273,23 @@ def aggregate(score_dir, model_dir, output_dir, as_of, min_comments=20, min_vide
                             negative_share=opinions['negative']/denominator if denominator and not sentiment_suppressed else None,
                             mixed_share=opinions['mixed']/denominator if denominator and not sentiment_suppressed else None,
                             topic_support_suppressed=suppressed, sentiment_support_suppressed=sentiment_suppressed))
-                wide[f'yt_{aspect}_mention_share'] = None if suppressed else mention_share
-                wide[f'yt_{aspect}_topic_missing'] = suppressed
-                if aspect in SENTIMENT_ASPECTS:
+                if aspect != 'overall':
+                    wide[f'yt_{aspect}_mention_share'] = None if suppressed else mention_share
+                    wide[f'yt_{aspect}_topic_missing'] = suppressed
+                if aspect in SENTIMENT_ASPECTS or aspect == 'overall':
                     wide[f'yt_{aspect}_video_balanced_net'] = net
                     wide[f'yt_{aspect}_opinion_count'] = denominator
                     wide[f'yt_{aspect}_opinion_video_count'] = opinion_videos
                     wide[f'yt_{aspect}_missing'] = sentiment_suppressed
+                    if extended:
+                        suffix_keys = dict(video_balanced_soft_net='soft_net', mean_confidence='confidence',
+                                           mean_margin='margin', mean_entropy='entropy', low_confidence_share='low_confidence')
+                        supported_values = [v['sentiment'][aspect] for v in videos if v['sentiment'][aspect]]
+                        for suffix, key in suffix_keys.items():
+                            value = (float(np.mean([np.mean([r[key] for r in group]) for group in supported_values]))
+                                     if supported_values and not sentiment_suppressed else None)
+                            wide[f'yt_{aspect}_{suffix}'] = value
+                            long_output[-1][suffix] = value
             wide_output.append(wide)
     connection.close()
     if not wide_output:
@@ -253,6 +306,11 @@ def aggregate(score_dir, model_dir, output_dir, as_of, min_comments=20, min_vide
                     video_rows=len(video_output), min_comments=min_comments,min_videos=min_videos,
                     audit=dict(audit), shards=shards, code_sha256=implementation_hashes(),
                     validation_status='not_independently_validated', price_model_integration=False,
+                    sentiment_schema_version=2 if extended else 1,
+                    sentiment_policy=scores['config'].get('sentiment_policy', 'threshold'),
+                    sentiment_temperature=scores['config'].get('sentiment_temperature', 1.),
+                    score_calibration='fitted' if scores['config'].get('calibration_sha256') else 'uncalibrated',
+                    calibration_label_source=scores['config'].get('calibration_label_source'),
                     support_suppressed_wide_rows=sum(r['yt_support_suppressed'] for r in wide_output))
     atomic_json(output_dir/'feature_manifest.json', manifest)
     return manifest

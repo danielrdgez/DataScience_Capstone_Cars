@@ -27,7 +27,7 @@ from sklearn.decomposition import NMF, PCA
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, TfidfVectorizer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
-from sklearn.metrics import adjusted_rand_score, mean_absolute_error, silhouette_score
+from sklearn.metrics import adjusted_rand_score, silhouette_score
 from sklearn.model_selection import GroupKFold, GridSearchCV
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, normalize

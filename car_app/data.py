@@ -12,6 +12,7 @@ import polars as pl
 import streamlit as st
 
 from EDA.DATA_CLEANING import EXCLUDED_LISTING_VINS
+from YOUTUBE.text.sentiment import DEFAULT_PRICE_FEATURE_DIRECTORY
 
 ROOT = Path(__file__).resolve().parents[1]
 COHORT = ["ModelYear", "Make", "Model", "Trim"]
@@ -84,6 +85,21 @@ def normalize_family(frame: pl.LazyFrame, columns=FAMILY):
     )
 
 
+@st.cache_data(max_entries=4, show_spinner=False)
+def _youtube_feature_source(directory: str, signature: tuple):
+    from NHTSA.text_features import load_youtube_features
+
+    return load_youtube_features(directory)
+
+
+def youtube_feature_source(directory):
+    directory = Path(directory).resolve()
+    signature = tuple((name, (directory / name).stat().st_size, (directory / name).stat().st_mtime_ns)
+                      for name in ("make_features.parquet", "price_feature_manifest.json"))
+    features, receipt = _youtube_feature_source(str(directory), signature)
+    return features, receipt, signature
+
+
 class Snapshot:
     def __init__(self, directory: Path | str = ROOT / "DATA/CAR_DATA_FINAL"):
         self.directory = Path(directory)
@@ -100,6 +116,11 @@ class Snapshot:
                     raise ValueError(f"{table}.{name}: snapshot type differs from manifest")
             stat = path.stat()
             signature.append((table, stat.st_size, stat.st_mtime_ns))
+        feature_directory = self.directory.parents[1] / DEFAULT_PRICE_FEATURE_DIRECTORY.relative_to(ROOT)
+        for name in ("make_features.parquet", "price_feature_manifest.json"):
+            path = feature_directory / name
+            stat = path.stat() if path.is_file() else None
+            signature.append((str(path), stat.st_size if stat else None, stat.st_mtime_ns if stat else None))
         self.identity = hashlib.sha256(json.dumps(
             {"tables": signature, "excluded_listing_vins": sorted(EXCLUDED_LISTING_VINS)}
         ).encode()).hexdigest()
@@ -180,27 +201,32 @@ class Snapshot:
                 .agg(pl.len().alias("listings")).sort("lower").collect()
                 .with_columns((pl.col("lower") + width).alias("upper")))
 
-    def youtube(self, filters):
+    def youtube(self, filters, directory=None):
         makes = self.catalog(filters).select("Make").drop_nulls().unique().collect()["Make"]
-        path = self.directory.parents[1] / "YOUTUBE/outputs/price_features_v1/make_features.parquet"
-        if not path.is_file():
+        directory = Path(directory) if directory else self.directory.parents[1] / DEFAULT_PRICE_FEATURE_DIRECTORY.relative_to(ROOT)
+        if not (directory / "make_features.parquet").is_file():
             return pl.DataFrame()
-        return pl.read_parquet(path).filter(pl.col("Make").is_in(makes.to_list()))
+        features, _, _ = youtube_feature_source(directory)
+        return features.filter(pl.col("Make").is_in(makes.to_list()))
 
 
-    def youtube_comments(self, filters, limit=10):
+    def youtube_comments(self, filters, limit=10, directory=None, as_of=None):
         makes = self.catalog(filters).select("Make").drop_nulls().unique().collect()["Make"].to_list()
-        paths = sorted((self.directory.parents[1] / "YOUTUBE/outputs/text_scored_v1/shards").glob("*.parquet"))
+        directory = Path(directory) if directory else self.directory.parents[1] / DEFAULT_PRICE_FEATURE_DIRECTORY.relative_to(ROOT)
+        paths = sorted((directory.parent / "scored/shards").glob("*.parquet"))
         if not paths or not makes:
             return pl.DataFrame()
+        if as_of is None:
+            _, receipt, _ = youtube_feature_source(directory)
+            as_of = receipt["as_of"]
         columns = ["Make", "comment_id", "video_title", "published_date", "text"]
         return (pl.scan_parquet(paths).filter(
             pl.col("Make").is_in(makes)
             & (pl.col("attribution_scope") == "explicit_comment")
             & pl.col("feature_eligible") & ~pl.col("development_excluded")
             & ~pl.col("direct_price_mention")
-            & (pl.col("published_date") <= "2026-10-01")
-            & (pl.col("updated_date") <= "2026-10-01")
+            & (pl.col("published_date") <= as_of)
+            & (pl.col("updated_date") <= as_of)
         ).select(columns).unique(subset=["Make", "comment_id"], maintain_order=True)
           .head(limit).collect())
 
@@ -213,6 +239,8 @@ def snapshot_at(signature: tuple):
 def snapshot():
     directory = ROOT / "DATA/CAR_DATA_FINAL"
     paths = [directory / "manifest.json", *sorted(directory.glob("*.parquet"))]
+    paths.extend(path for name in ("make_features.parquet", "price_feature_manifest.json")
+                 if (path := DEFAULT_PRICE_FEATURE_DIRECTORY / name).is_file())
     signature = tuple((str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in paths)
     return snapshot_at(signature)
 
@@ -256,9 +284,10 @@ def query_snapshot(identity: str, filters: Filters, operation: str, *args):
         return source.catalog(filters).select("vin", *COHORT, "price", "mileage").sort(
             pl.col("vin").hash(seed=42)).head(3000).collect()
     if operation == "youtube_comments":
-        return source.youtube_comments(filters)
+        return source.youtube_comments(filters, directory=args[0] if args else None,
+                                       as_of=args[1] if len(args) > 1 else None)
     if operation == "youtube":
-        return source.youtube(filters)
+        return source.youtube(filters, directory=args[0] if args else None)
     raise ValueError("Unsupported query")
 
 

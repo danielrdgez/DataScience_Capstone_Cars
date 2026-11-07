@@ -21,6 +21,7 @@ import polars as pl
 
 from EDA.DATA_CLEANING import FINAL_DATASET_PATH, PARQUET_FILES
 from MODELS.Price_ML_Models import BASE_FEATURE_COLUMNS
+from MODELS.cohort_price_mileage_review import _scope_expression
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -43,18 +44,6 @@ def _collect(frame: pl.LazyFrame | pl.Expr) -> pl.DataFrame:
 
 def _write_csv(frame: pl.DataFrame, path: Path) -> None:
     frame.write_csv(path)
-
-
-def _scope_expression() -> pl.Expr:
-    value = pl.col("is_new").cast(pl.String).str.strip_chars().str.to_lowercase()
-    return (
-        pl.when(value.is_in(["true", "1", "new"]))
-        .then(pl.lit("new"))
-        .when(value.is_in(["false", "0", "used"]))
-        .then(pl.lit("used"))
-        .otherwise(pl.lit("unknown"))
-        .alias("vehicle_scope")
-    )
 
 
 def _normalized_string(column: str) -> pl.Expr:
