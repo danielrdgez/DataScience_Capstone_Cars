@@ -143,7 +143,7 @@ class Catalog:
 def active_catalog(source, grain="model"):
     from car_app.model_registry import registry
 
-    config = registry()
+    config = registry(include_price_diagnostics=False)
     run = config.get("discovery_run")
     if not run:
         return None
@@ -901,7 +901,17 @@ def search_lists(source, requirements, revision, config, legacy_catalog=None, *,
     spec = diverse_top(spec, order_prefix + ["specification_distance"], asc_prefix + [True], limit)
     warnings, price = [], pd.DataFrame()
     active = config.get("active_price")
-    if active:
+    if "recommendation_price" in config:
+        try:
+            from car_app.recommendation_price import heldout_prices
+            prediction = heldout_prices(config["recommendation_price"])
+            price = eligible.merge(prediction, on="vin", validate="1:1")
+            price["model_relative_price"] = (price.predicted_price_usd - price.price) / price.predicted_price_usd
+            price["price_model"] = config["recommendation_price"]["run"] + "/" + config["recommendation_price"].get("model", "catboost-oof")
+            price = diverse_top(price, order_prefix + ["model_relative_price"], asc_prefix + [False], limit)
+        except (OSError, ValueError, KeyError, AssertionError) as exc:
+            warnings.append("Recommendation held-out price list unavailable: " + str(exc))
+    elif active:
         try:
             model_path = a.ROOT / "MODEL_OUTPUT" / active["run"]
             if a.file_hash(model_path / "run_metadata.json") != active["metadata_sha256"] or a.file_hash(model_path / active["model"] / "predictor.joblib") != active["predictor_sha256"]:

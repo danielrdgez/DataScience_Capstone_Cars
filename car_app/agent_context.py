@@ -6,15 +6,12 @@ import json
 import math
 import re
 from itertools import zip_longest
-from functools import lru_cache
 
 import pandas as pd
 import polars as pl
 
 from car_app.data import COHORT, ROOT
 
-TREE_MODELS = {"catboost", "lightgbm", "xgboost"}
-LINEAR_MODELS = {"multiple_linear_regression", "lasso", "ridge", "elastic_net", "pcr"}
 PRIORITY_SORTS = {"Lower advertised mileage": "Mileage", "Lower purchase price": "Observed price",
                   "Performance": "Advertised horsepower", "Passenger / cargo space": "Seating"}
 
@@ -52,38 +49,11 @@ def dictionary_context(terms=()):
 
 
 def saved_price_explanations(config):
-    """Saved family champions remain interpretable even when live inference is incompatible."""
-    from car_app.artifacts import recommendation_inventory, Run, saved_shap
-    from car_app.model_registry import read_json, digest
-
-    result = {}
-    selection = config.get("recommendation_price_selection") or config.get("price_run_selection")
-    if not selection:
-        return result
-    _, candidates, _, _ = recommendation_inventory(config)
-    if candidates.empty:
-        return result
-    for family, names in (("tree", TREE_MODELS), ("linear", LINEAR_MODELS)):
-        rows = candidates.loc[candidates.model.isin(names)].sort_values(["validation_mae", "feature_set", "model"])
-        if rows.empty:
-            continue
-        row = rows.iloc[0]
-        path = ROOT / "MODEL_OUTPUT" / row.run
-        try:
-            metadata = read_json(path / "run_metadata.json")
-            explanation = saved_shap(Run(path, metadata), row.model)
-            result[family] = {"run": row.run, "model": row.model, "feature_set": row.feature_set,
-                "validation_mae_usd": float(row.validation_mae), "selection": "lowest validation MAE within the configured AI model pool",
-                "metadata_sha256": digest(path / "run_metadata.json"),
-                "predictor_sha256": digest(path / row.model / "predictor.joblib"),
-                "method": explanation.attrs.get("method"), "scale": explanation.attrs.get("scale"),
-                "sample_rows": explanation.attrs.get("sample_rows"),
-                "global_features": clean(explanation.head(8).to_dict("records")),
-                "status": "available" if not explanation.empty else "saved explanation unavailable",
-                "scope": "Global price associations, not local effects or buyer-preference importance; not permission for live inference."}
-        except (OSError, ValueError, KeyError) as exc:
-            result[family] = {"run": row.run, "model": row.model, "status": "unavailable", "reason": str(exc)}
-    return result
+    """Never borrow an explanation from an unrelated historical checkpoint."""
+    models = selected_price_models(config)
+    return {family: {**models[family], "global_features": [],
+            "status": "No verified explanation loaded for this selected price checkpoint."}
+            for family in ("tree", "linear", "catboost") if models.get(family)}
 
 
 def clean(value):
@@ -128,79 +98,14 @@ def round_robin(groups, limit=30):
 
 
 def selected_price_models(config):
-    """Choose tree/linear champions within the AI's completed-checkpoint policy."""
-    from car_app.artifacts import recommendation_inventory
-    from car_app.model_registry import digest, validate_price_run, inference_code_fingerprint
-
-    result = {"tree": None, "linear": None, "primary": None, "unavailable": []}
-    selection = config.get("recommendation_price_selection") or config.get("price_run_selection")
-    if not selection:
-        result["unavailable"].append("No selected price suite is configured.")
-        return result
-    _, candidates, _, _ = recommendation_inventory(config)
-    if candidates.empty:
-        result["unavailable"].append("Selected price checkpoints are pending or unavailable.")
-        return result
-    ordered = candidates.sort_values(["validation_mae", "feature_set", "model"])
-    result["selection_candidates"] = clean(ordered[["feature_set", "model", "run", "validation_mae"]].to_dict("records"))
-    active = config.get("active_price") or {}
-    explicit = bool(config.get("price_user_selected"))
-    wanted = (active.get("run"), active.get("model"))
-    for row in ordered.itertuples():
-        family = "tree" if row.model in TREE_MODELS else "linear" if row.model in LINEAR_MODELS else None
-        is_choice = (row.run, row.model) == wanted
-        if family is None or (result[family] is not None and not (explicit and is_choice)):
-            continue
-        try:
-            path = ROOT / "MODEL_OUTPUT" / row.run
-            validate_price_run(path, row.model)
-            receipt = {"run": row.run, "model": row.model, "feature_set": row.feature_set,
-                       "validation_mae_usd": float(row.validation_mae),
-                       "inference_code_fingerprint": inference_code_fingerprint(),
-                       "metadata_sha256": digest(path / "run_metadata.json"),
-                       "predictor_sha256": digest(path / row.model / "predictor.joblib")}
-            if result[family] is None:
-                result[family] = receipt
-            if (result["primary"] is None and not explicit) or (explicit and is_choice):
-                result["primary"] = receipt
-        except (OSError, ValueError, KeyError) as exc:
-            result["unavailable"].append(f"{row.feature_set}/{row.model}: {exc}")
-    if explicit and result["primary"] is None:
-        result["unavailable"].append("The explicitly selected model is not eligible for inference.")
-    return result
-
-
-@lru_cache(maxsize=32)
-def cached_estimates(vins, model_json, source_signature):
-    """Reuse successful predictions only after the caller validates current artifact/source receipts."""
-    from car_app.model_registry import price_estimates
-    frame, warning = price_estimates(pl.DataFrame({"vin": list(vins)}), {"active_price": json.loads(model_json)})
-    if warning or "predicted_price_usd" not in frame:
-        raise ValueError(warning or "Price estimate unavailable")
-    return tuple((row["vin"], row["predicted_price_usd"]) for row in frame.select("vin", "predicted_price_usd").to_dicts())
+    """Resolve the configured recommendation price policy."""
+    from car_app.recommendation_price import select_model
+    return select_model(config)
 
 
 def compare_prices(listings, models):
-    from car_app.model_registry import price_sources, read_json
-    from car_app.artifacts import stat_key
-
-    comparisons = {listing_id(v): {} for v in listings["vin"].to_list()}
-    warnings = list(models["unavailable"])
-    for family in ("tree", "linear"):
-        receipt = models[family]
-        if receipt is None:
-            continue
-        try:
-            metadata = read_json(ROOT / "MODEL_OUTPUT" / receipt["run"] / "run_metadata.json")
-            signature = tuple((name, str(path), stat_key(path)) for name, path in price_sources(metadata).items())
-            predictions = cached_estimates(tuple(sorted(listings["vin"].to_list())), json.dumps(receipt, sort_keys=True), signature)
-            for vin, prediction in predictions:
-                comparisons[listing_id(vin)][family] = {
-                    **receipt, "predicted_price_usd": prediction,
-                    "use": "supplemental estimate; not a held-out value signal"}
-        except (OSError, ValueError, KeyError) as exc:
-            warnings.append(f"{family}: {exc}")
-    return comparisons, warnings
+    from car_app.recommendation_price import price_evidence
+    return price_evidence(listings, models)
 
 
 class RecommendationContext:
@@ -235,7 +140,7 @@ class RecommendationContext:
         try:
             self.models = selected_price_models(self.config)
         except (OSError, ValueError, KeyError) as exc:
-            self.models = {"tree": None, "linear": None, "primary": None, "unavailable": ["Price selection unavailable: " + str(exc)]}
+            self.models = {"catboost": None, "primary": None, "unavailable": ["Price selection unavailable: " + str(exc)]}
         self.artifacts["price_models"] = self.models
         self.warnings.extend(self.models["unavailable"])
         try:
@@ -250,7 +155,7 @@ class RecommendationContext:
             # The shared list builder validates source, predictor, and held-out split receipts.
             try:
                 self.lists = search_lists(self.source, req, req["revision"],
-                    {**self.config, "active_price": self.models["primary"]}, self.legacy,
+                    {**self.config, "recommendation_price": self.models["primary"]}, self.legacy,
                     include_text=False, limit=10)
                 if self.lists:
                     lists = self.lists["ranked_lists"]
@@ -377,9 +282,9 @@ class RecommendationContext:
         self.checked_ids(ids)
         prior_warnings = set(self.warnings)
         full_prices = self.prices(ids)
-        provenance = {family: {key: value for key, value in model.items() if key not in ("explanation", "predicted_price_usd", "use")}
-                      for row in full_prices for family, model in row["models"].items()}
-        prices = [{**row, "models": {family: {key: model[key] for key in ("predicted_price_usd", "use")}
+        provenance = {row["candidate_id"]: {family: {key: value for key, value in model.items() if key not in ("explanation", "predicted_price_usd", "use")}
+                      for family, model in row["models"].items()} for row in full_prices}
+        prices = [{**row, "models": {family: {key: model[key] for key in ("predicted_price_usd", "prediction_kind", "use")}
                    for family, model in row["models"].items()}} for row in full_prices]
         evidence = []
         for row in self.evidence(ids):
@@ -393,7 +298,7 @@ class RecommendationContext:
             evidence.append(compact)
         horsepower = [row["horsepower"] for row in self.listings.values() if row.get("horsepower") is not None]
         maximum = max(horsepower) if horsepower else None
-        return {"price_comparisons": prices, "price_model_provenance": provenance, "source_evidence": evidence,
+        return {"price_evidence": prices, "price_model_provenance": provenance, "source_evidence": evidence,
                 "specification_peers": self.specification_peers(ids),
                 "price_explanation_refs": {family: "price_explanation:" + family for family in self.model_explanations},
                 "performance_comparison": {"scope": "entire retrieved eligible pool",
@@ -446,18 +351,9 @@ class RecommendationContext:
             self.price_rows.update(comparisons)
             self.warnings.extend(warnings)
         result = []
-        from car_app.artifacts import Run, saved_shap
-        from car_app.model_registry import read_json
         for cid in ids:
-            data = {"candidate_id": cid, "models": self.price_rows[cid],
-                    "disagreement_is_not_a_prediction_interval": True}
-            for family, model in data["models"].items():
-                path = ROOT / "MODEL_OUTPUT" / model["run"]
-                explanation = saved_shap(Run(path, read_json(path / "run_metadata.json")), model["model"])
-                model["explanation"] = {"method": explanation.attrs.get("method"),
-                    "scale": explanation.attrs.get("scale"), "global_features": clean(explanation.head(8).to_dict("records")),
-                    "scope": "global model explanation; not a local explanation of this listing"} if not explanation.empty else None
-            ref = self.add_ref(cid + ":price_comparison", data)
+            data = {"candidate_id": cid, "models": self.price_rows[cid], "prediction_interval_available": False}
+            ref = self.add_ref(cid + ":price_evidence", data)
             self.listings[cid]["source_refs"] = list(dict.fromkeys([*self.listings[cid]["source_refs"], ref]))
             result.append({**data, "source_ref": ref})
         return result

@@ -20,6 +20,85 @@ from NHTSA import text_features as text
 
 
 class PriceEvaluationTests(unittest.TestCase):
+    def test_oof_membership_is_order_and_target_independent(self):
+        from MODELS.price_oof import assign_folds, inner_split
+        frame = pd.DataFrame({"vin": [f"vin-{i}" for i in range(60)], "ModelYear": [2020] * 60,
+                              "Make": ["TEST"] * 60, "Model": ["A"] * 30 + ["B"] * 30,
+                              "Trim": ["BASE"] * 60, "price": np.arange(60) + 10000})
+        original = assign_folds(frame, 10)
+        reordered = frame.sample(frac=1, random_state=5).reset_index(drop=True)
+        reordered["price"] *= 20
+        repeated = assign_folds(reordered, 10)
+        self.assertEqual(dict(zip(frame.vin, original)), dict(zip(reordered.vin, repeated)))
+        for fold in range(10):
+            training = np.flatnonzero(original != fold)
+            fit, validation = inner_split(frame, training, f"fold_{fold:02d}")
+            self.assertFalse(set(fit) & set(validation))
+            self.assertEqual(set(fit) | set(validation), set(training))
+            self.assertFalse(set(np.flatnonzero(original == fold)) & (set(fit) | set(validation)))
+        with self.assertRaisesRegex(ValueError, "unique"):
+            assign_folds(pd.concat([frame, frame.iloc[:1]], ignore_index=True), 10)
+
+    def test_oof_outer_target_changes_do_not_change_fitted_predictions(self):
+        from MODELS import price_oof as oof
+        frame = pd.DataFrame({"vin": [f"vin-{i}" for i in range(40)], "ModelYear": [2020] * 40,
+            "Make": ["TEST"] * 40, "Model": ["A"] * 40, "Trim": ["BASE"] * 40,
+            "is_new": [False] * 40, "mileage": np.arange(40) * 100,
+            "_cohort_group": ["TEST-A"] * 40, "price": np.arange(40) * 50 + 10000,
+            "number": np.arange(40, dtype=float), "category": ["a", "b"] * 20})
+        training, heldout = np.arange(30), np.arange(30, 40)
+        options = {"tuning_rows": 100, "max_trees": 2}
+        info = {"expert_features": {}, "youtube_features": {}}
+        observed = []
+        def select(name, x_fit, y_fit, x_val, y_val, *args, **kwargs):
+            observed.append((np.asarray(y_fit).copy(), np.asarray(y_val).copy()))
+            self.assertLess(x_fit.number.max(), 30)
+            self.assertLess(x_val.number.max(), 30)
+            kwargs["selected_evaluation"]["validation_mae"] = 1.0
+            return 2, 1.0, {"depth": 2}, False
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(oof, "FEATURES", ["number", "category"]), \
+             patch.object(price, "_fit_with_early_stopping", side_effect=select):
+            roots = [Path(directory) / name for name in ("first", "second")]
+            for root in roots:
+                root.mkdir()
+            oof.fit_stage(roots[0], "fold_00", frame, training, heldout, options, info, ["category"], "cpu")
+            changed = frame.copy()
+            changed.loc[heldout, "price"] *= 100
+            oof.fit_stage(roots[1], "fold_00", changed, training, heldout, options, info, ["category"], "cpu")
+            first = pd.read_parquet(roots[0] / "fold_00/predictions.parquet")
+            second = pd.read_parquet(roots[1] / "fold_00/predictions.parquet")
+            np.testing.assert_allclose(first.prediction, second.prediction, rtol=1e-10)
+            for before, after in zip(observed[0], observed[1]):
+                np.testing.assert_array_equal(before, after)
+            roles = pd.read_parquet(roots[0] / "fold_00/selection_split.parquet")
+            self.assertEqual(set(roles.loc[roles.role.eq("outer_holdout"), "vin"]), set(frame.iloc[heldout].vin))
+
+    def test_oof_receipts_reject_missing_duplicate_wrong_fold_and_invalid_usd(self):
+        from MODELS.price_oof import validate_oof_rows
+        assignments = pd.DataFrame({"vin": ["a", "b"], "fold": [0, 1], "actual_price": [10000., 12000.]})
+        predictions = assignments.assign(prediction=[11000., 11500.])
+        validate_oof_rows(assignments, predictions.iloc[::-1])
+        invalid = [predictions.iloc[:1], pd.concat([predictions, predictions.iloc[:1]]),
+                   predictions.assign(fold=[1, 0]), predictions.assign(prediction=[0., 11500.]),
+                   predictions.assign(prediction=[float("nan"), 11500.])]
+        for rows in invalid:
+            with self.subTest(rows=rows.to_dict("list")), self.assertRaises((ValueError, AssertionError)):
+                validate_oof_rows(assignments, rows)
+
+    def test_oof_file_receipts_detect_changed_or_escaping_artifacts(self):
+        from MODELS.price_oof import digest, verify_files
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "predictor.joblib").write_bytes(b"original")
+            receipt = {"predictor.joblib": digest(root / "predictor.joblib")}
+            verify_files(root, receipt)
+            (root / "predictor.joblib").write_bytes(b"changed predictor")
+            with self.assertRaisesRegex(ValueError, "Artifact changed"):
+                verify_files(root, receipt)
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                verify_files(root, {"../outside": "untrusted"})
+
     def test_all_variants_use_log_mileage_only(self):
         excluded = {'mileage', 'engine_displacement', 'maximum_seating_numeric',
                     'listing_color', 'fuel_type', 'body_type',

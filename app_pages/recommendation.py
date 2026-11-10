@@ -9,7 +9,7 @@ from car_app.requirements import (EQUIPMENT, PRIORITIES, USE_CASES, QuestionDraf
                                   amount_label, budget_amount, mileage_amount, range_presets)
 from car_app.recommendation import load_similarity, category_explorer, SIMILARITY_LABELS
 from car_app.model_registry import digest, price_estimates, registry
-from car_app.artifacts import stat_key, recommendation_inventory
+from car_app.artifacts import stat_key
 from car_app.state import update_result_context
 from car_app.discovery import active_catalog as active_discovery, COMPONENTS as ISSUE_COMPONENTS, profile_names, discovery_caption
 from car_app.agent_ui import render_chat, submit_request, sync_question_widgets
@@ -26,7 +26,7 @@ st.caption("Historical listings and advertised USD prices through 2020. Mileage 
 config, catalog, discovery = {}, None, None
 artifact_warnings = []
 try:
-    config = registry()
+    config = registry(include_price_diagnostics=False)
 except (OSError, ValueError, KeyError) as exc:
     artifact_warnings.append(f"Saved artifact registry unavailable: {exc}")
 try:
@@ -96,8 +96,6 @@ with st.container(border=True):
             st.caption("Select in priority order. Unsupported needs remain explicit evidence gaps.")
         category_preferences, category_mode = {}, "prefer"
         evidence_period, reference_profile_id, avoided_components = "historical", None, []
-        price_choice = None
-        choices = pd.DataFrame()
         with st.expander("Additional preferences"):
             st.caption("Optional limits. Unknown facts cannot satisfy a must-have. Seller reports do not verify vehicle condition.")
             condition = st.selectbox("New, used, or either?", ["Not decided", "Either", "Used", "New"],
@@ -131,25 +129,12 @@ with st.container(border=True):
                     format_func=lambda value: "Historical through 2020" if value == "historical" else "Latest saved evidence; historical prices",
                     key="rec_evidence_period")
                 avoided_components = st.multiselect("Reported component concerns to consider", ISSUE_COMPONENTS, key="rec_avoid_components")
-            try:
-                _, choices, _, _ = recommendation_inventory(config)
-                if not choices.empty:
-                    options = [None, *choices.label.tolist()]
-                    if st.session_state.get("rec_price_model") not in options:
-                        st.session_state["rec_price_model"] = None
-                    price_choice = st.selectbox("Supplemental price model", options,
-                        format_func=lambda value: "Automatic (validation MAE)" if value is None else value, key="rec_price_model")
-            except (OSError, ValueError, KeyError) as exc:
-                artifact_warnings.append(f"Price model choices unavailable: {exc}")
+            st.caption("Price evidence: best completed tree and linear checkpoints by validation MAE. "
+                       "Historical value ranking uses saved held-out test predictions; other estimates are supplemental.")
         submitted = st.form_submit_button("Get AI recommendations", key="recommendation_search", type="primary",
             icon=":material/auto_awesome:", disabled=session.request_id is not None)
     st.caption("Submitting these answers or a follow-up sends the necessary vehicle context to OpenAI. Ordinary page interactions make no AI request.")
 
-if price_choice is not None:
-    choice = choices.loc[choices.label.eq(price_choice)].iloc[0]
-    path = ROOT / "MODEL_OUTPUT" / choice.run
-    config = {**config, "price_user_selected": True, "active_price": {"run": choice.run, "model": choice.model,
-        "metadata_sha256": digest(path / "run_metadata.json"), "predictor_sha256": digest(path / choice.model / "predictor.joblib")}}
 identity = source.identity + json.dumps(config, sort_keys=True) + (str(catalog.path) if catalog else "")
 if discovery is not None:
     identity += str(discovery.path) + discovery.receipt["completed_at"]

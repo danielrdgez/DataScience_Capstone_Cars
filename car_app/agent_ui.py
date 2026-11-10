@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from car_app.agent import markdown_receipt, run_turn, RESULT_SCHEMA_VERSION
-from car_app.agent_context import identity, selected_price_models, compare_prices, listing_id, dictionary_context
+from car_app.agent_context import identity, dictionary_context
 from car_app.data import COHORT
 from car_app.requirements import amount_label
 
@@ -19,37 +19,6 @@ def sync_reference(panel, reference):
         panel.agent_result = None
         panel.request_id = None
         panel.revision += 1
-
-
-def load_price_comparisons(result, source, config, legacy=None):
-    """Explicit local inference; leave the bounded provider turn and its ranking unchanged."""
-    import polars as pl
-    from copy import deepcopy
-    from car_app.recommendation import search_candidates
-
-    updated = deepcopy(result)
-    models = selected_price_models(config)
-    frozen = result["artifacts"].get("price_models", {})
-    for family in ("tree", "linear"):
-        if models.get(family) != frozen.get(family):
-            models[family] = None
-            models["unavailable"].append(f"{family} checkpoint changed; submit again for new model estimates.")
-    ids = [r["candidate_id"] for r in result["answer"]["listings"]]
-    vins = [result["candidates"][cid]["vin"] for cid in ids]
-    req = result["requirements"]
-    rows = search_candidates(source, req, result["revision"], catalog=legacy, return_population=True).filter(
-        pl.col("vin").is_in(vins)).collect()
-    if set(rows["vin"].to_list()) != set(vins):
-        raise ValueError("The returned listings no longer meet the requirements; submit again")
-    prices, warnings = compare_prices(rows, models)
-    updated["warnings"].extend(warnings)
-    for vin in vins:
-        cid = listing_id(vin)
-        ref = cid + ":price_comparison"
-        updated["source_refs"][ref] = {"candidate_id": cid, "models": prices[cid],
-                                         "disagreement_is_not_a_prediction_interval": True}
-        updated["candidates"][cid]["source_refs"] = list(dict.fromkeys([*updated["candidates"][cid]["source_refs"], ref]))
-    return updated
 
 
 def sync_question_widgets(panel):
@@ -171,7 +140,7 @@ def render_result(result, key, panel=None, source=None, config=None, legacy=None
             representations = {channel["representation"] for channel in channels if channel.get("features")}
             coverage.append({"Vehicle": vehicle_title(result["candidates"][cid]),
                 "Evidence reviewed": cid in result.get("evidence_reviewed_ids", []),
-                "Price estimates": ", ".join(result["source_refs"].get(cid + ":price_comparison", {}).get("models", {})) or "Unavailable",
+                "Price estimates": ", ".join(result["source_refs"].get(cid + ":price_evidence", {}).get("models", {})) or "Unavailable",
                 "Specification group": "Saved" if result["candidates"][cid].get("specifications") else "Unavailable",
                 "Similar peers": len(result["source_refs"].get(cid + ":specification_peers", {}).get("peers", [])),
                 "Crash-test variants": evidence.get("safety", {}).get("total_variants"),
@@ -189,33 +158,18 @@ def render_result(result, key, panel=None, source=None, config=None, legacy=None
                 st.caption(str(explanation.get("method")) + " · " + str(explanation.get("scale")) + ". Global associations do not explain this vehicle's price or buyer suitability.")
             else:
                 st.caption(explanation["status"])
-        models = result["artifacts"].get("price_models", {})
-        if models.get("selection_candidates"):
-            st.markdown("**Eligible price checkpoints**")
-            st.dataframe(pd.DataFrame(models["selection_candidates"]), hide_index=True, width="stretch",
-                         alt="Newest completed Base, Enhanced and Full price checkpoints considered by the AI, excluding Random Forest")
-        if models and result["answer"]["listings"] and panel is not None:
-            if st.button("Load tree and linear estimates", key=key + "_prices",
-                         disabled=not any(models.get(family) for family in ("tree", "linear"))):
-                try:
-                    with st.spinner("Running saved price models locally..."):
-                        result = load_price_comparisons(result, source, config, legacy)
-                    panel.agent_result = result
-                except (ValueError, OSError) as exc:
-                    st.warning(str(exc))
-            st.caption("Optional price estimates use saved models locally and make no AI request.")
         comparisons = []
         selected_ids = {r["candidate_id"] for r in result["answer"]["listings"]}
         for cid in selected_ids:
             candidate = result["candidates"][cid]
-            price = result["source_refs"].get(cid + ":price_comparison", {})
+            price = result["source_refs"].get(cid + ":price_evidence", {})
             for family, model in price.get("models", {}).items():
                 comparisons.append({**{c: candidate.get(c) for c in COHORT}, "family": family,
-                    **{k: model[k] for k in ("predicted_price_usd", "model", "feature_set", "run", "validation_mae_usd")}})
+                    **{k: model.get(k) for k in ("predicted_price_usd", "prediction_kind", "fold", "model", "feature_set", "run", "validation_mae_usd", "oof_mae_usd", "missing_feature_count")}})
         if comparisons:
             st.dataframe(pd.DataFrame(comparisons), hide_index=True, width="stretch",
-                         alt="Supplemental tree and linear historical price estimates")
-            st.caption("Model differences are not prediction intervals. Estimates do not establish a verified discount.")
+                         alt="Selected tree and linear historical price estimates and provenance")
+            st.caption("Held-out test prices exclude each vehicle from fitting. Supplemental inference may include fitting VINs and cannot support held-out value ranking. Estimates are historical; no verified discount or prediction interval is established.")
         for warning in dict.fromkeys(result["warnings"]):
             st.caption(warning)
         if result.get("exclusions"):

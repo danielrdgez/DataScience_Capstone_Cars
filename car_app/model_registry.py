@@ -243,9 +243,9 @@ def price_sources(metadata):
     return paths
 
 
-def registry():
+def registry(*, include_price_diagnostics=True):
     config = read_json(CONFIG)
-    if config.get("price_run_selection") is not None:
+    if include_price_diagnostics and config.get("price_run_selection") is not None:
         from car_app.artifacts import diagnostic_inventory
 
         _, candidates, _, _ = diagnostic_inventory(config["price_run_selection"])
@@ -431,11 +431,17 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--output", type=Path, help="Fresh comparison report directory")
     mode.add_argument("--report", type=Path, help="Existing verified report for explicit activation")
+    mode.add_argument("--activate-recommendation", type=Path,
+                      help="Activate a validated Full CatBoost OOF bundle for the AI only")
     parser.add_argument("--activate", help="Explicit variant/run/estimator to activate after checks")
     parser.add_argument("--explain-rows", type=int, default=0,
                         help="Explain each comparison-group validation winner on this many saved rows in report copies")
     parser.add_argument("--publish", action="store_true", help="Show this report in the app without changing its price model")
     args = parser.parse_args()
+    if args.activate_recommendation:
+        from car_app.recommendation_price import activate as activate_recommendation
+        print(json.dumps(activate_recommendation(args.activate_recommendation), indent=2))
+        return
     report = args.output or args.report
     if args.output:
         _, candidates, receipt = build_report(report, explain_rows=args.explain_rows)

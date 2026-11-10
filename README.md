@@ -33,7 +33,13 @@ flowchart LR
   F --> M["Price fits and held-out evaluation"]
   P --> V["Specification profiles and dated evidence"]
   M --> C["Verified saved checkpoints"]
-  C --> A["Dashboard and recommendation"]
+  C --> D["Model diagnostics"]
+  F --> O["Full CatBoost: ten OOF folds and final fit"]
+  O --> B["Validate and activate price bundle"]
+  B --> Q["Optional OOF pricing policy"]
+  Q --> A
+  C --> T["Best tree and linear by validation MAE"]
+  T --> A["Dashboard and recommendation"]
   V --> A
 ```
 
@@ -121,6 +127,60 @@ Use the printed suite directory for compatible-run comparison and deferred expla
 
 Reports retain USD errors, R², WAPE, bias, block-bootstrap intervals, subgroup errors, and source/split/predictor receipts. SHAP explains exact saved predictors on log-price; linear coefficients and forest impurity retain their own scales. Source/schema changes require compatible retraining.
 
+### Recommendation pricing
+
+The current dashboard policy (`best_tree_linear_v1`) selects the lowest validation-MAE completed tree and linear checkpoints from `price_run_selection`, including compatible per-estimator Full continuations. The AI receives both estimates separately without averaging. The current winners are Full CatBoost and Full multiple linear regression. Saved test predictions alone support model-relative value ranking; other candidate estimates are labeled supplemental inference and may include fitting VINs. Source/schema/package and frozen inference replay checks remain required. No retraining is needed.
+
+```powershell
+.\.venv-youtube\Scripts\python.exe -m streamlit run app.py
+```
+
+#### Optional Full CatBoost OOF workflow
+
+`MODELS.price_oof` uses the existing Full inputs and eligible population. Ten deterministic VIN folds rotate within decoded year/make/model strata; Trim stays separate and pools only for splitting. Every historical prediction excludes its VIN from fitting, preprocessing and inner parameter selection. Each fold selects settings on its own training portion with an inner 80/20 split, then refits on the other nine outer folds. A separate final selection/refit uses all eligible rows for new-vehicle inference. Training is sequential and does not activate itself.
+
+The default uses 200,000-row cohort-covered tuning samples and unlimited tree-budget expansion until early stopping, followed by the existing full inner-validation measurement and outer refit. It retains the log-price objective/iteration stopping and USD validation-MAE parameter selection. This is ten selection/refit workflows plus a final workflow, not eleven simple fits. The complete eligible dataset rotates through CV; there is no separate final test partition.
+
+Run from the repository root in the dashboard environment:
+
+```powershell
+$OofRun = "MODEL_OUTPUT/recommendation_price/" + (Get-Date -Format "yyyyMMddTHHmmss") + "-full-catboost-oof"
+.\.venv-youtube\Scripts\python.exe -m MODELS.price_oof train `
+  --output "$OofRun" --folds 10 --tuning-rows 200000 --max-trees 0 --device auto
+if ($LASTEXITCODE -ne 0) { throw 'OOF training failed; retain this run directory for resume.' }
+
+.\.venv-youtube\Scripts\python.exe -m MODELS.price_oof validate --run "$OofRun"
+if ($LASTEXITCODE -ne 0) { throw 'OOF validation failed.' }
+
+.\.venv-youtube\Scripts\python.exe -m car_app.model_registry --activate-recommendation "$OofRun"
+if ($LASTEXITCODE -ne 0) { throw 'Recommendation activation failed.' }
+
+.\.venv-youtube\Scripts\python.exe -m streamlit run app.py
+```
+
+Save the printed run path. To resume after interruption, set `$OofRun` to that same path and run:
+
+```powershell
+.\.venv-youtube\Scripts\python.exe -m MODELS.price_oof train --output "$OofRun" --resume
+```
+
+Resume reuses the saved configuration and completed folds only when source, code, package and device identities match; incomplete fits restart. Do not create a new timestamp when resuming. `--device gpu` requires a successful GPU probe; `auto` records a CPU fallback when needed. Sampled runs, finite tree caps and fewer than ten folds are development bundles and cannot activate for recommendations.
+
+Artifacts include `folds.parquet`, `oof_predictions.parquet`, pooled/per-fold `metrics.json`, subgroup CSVs, `fold_00/` through `fold_09/`, `final/predictor.joblib`, and hash-bound manifests. Validation checks coverage, disjoint selection roles, prediction provenance, metrics and frozen raw/prepared/USD replay for each predictor. A changed inference implementation needs successful revalidation and reactivation; source/schema/package changes require retraining. Default bundles contain no SHAP explanations.
+
+Explicit OOF activation replaces the current tree/linear policy with the activated Full CatBoost bundle. Training VINs use saved OOF prices; an absent OOF price never falls back to the all-data predictor. Other catalog VINs may receive clearly labeled supplemental inference. Historical value ranking uses OOF predictions only. When the OOF policy is selected without a valid activated run, its pricing is unavailable while observed-price filtering remains usable. Dashboard evaluation checkpoints remain separate.
+
+Score genuinely new VINs from listing Parquet rows without a price label:
+
+```powershell
+.\.venv-youtube\Scripts\python.exe -m MODELS.price_oof predict `
+  --run "$OofRun" --input "DATA/new_listings.parquet" --output "MODEL_OUTPUT/new_listing_prices.parquet"
+```
+
+Supply lowercase `vin` and observed listing fields. Enrichment uses the saved vPIC/YouTube/expert sources; missing decodes/features stay missing and use fitted preprocessing. Output includes missing-feature counts and historical-scope warnings. This does not fetch new decodes or establish current market prices. Training VINs must use the OOF bank instead; an existing output file is never overwritten.
+
+OOF metrics are conditional on the previously selected feature set and existing price-informed dataset exclusions. They measure predictions for unseen VINs within represented vehicle strata, not unseen families or independently validated future prices. Later YouTube/expert snapshots remain retrospective context; the final all-data model has no separate test score.
+
 ### Diagnostics and PCA
 
 Use the project `.venv` Jupyter kernel. Saved outputs retain their original schema and run identities.
@@ -206,7 +266,7 @@ Inference verifies feature order, preprocessing, packages, source and predictor 
 
 The [agent contract](MODELS/AI_AGENT_RECOMMENDATION_PLAN.md) owns tools, evidence requirements, checkpoint selection, request limits, and validation. Budget is an inclusive ceiling. Preset/custom budget and mileage caps accept values such as `18k` and `75k`; optional requirements stay under **Additional preferences**. Hard requirements use observed listing facts; unknown required facts fail.
 
-Only **Get AI recommendations**, follow-up, or retry calls OpenAI. Root `.env` supplies `OPENAI_API_KEY` and `OPENAI_MODEL` (currently `gpt-6-luna`); process values take precedence. Navigation, downloads, checkpoint refreshes, and optional local tree/linear estimates make no provider request. Failures show AI-unavailable status and separately labeled basic catalog results.
+Only **Get AI recommendations**, follow-up, or retry calls OpenAI. Root `.env` supplies `OPENAI_API_KEY` and `OPENAI_MODEL` (currently `gpt-6-luna`); process values take precedence. Navigation, downloads and local Full CatBoost training/validation/scoring make no provider request. Failures show AI-unavailable status and separately labeled basic catalog results.
 
 The AI retrieves dictionary definitions, qualifying candidates, saved specification context, compatible price estimates, and dated source evidence before returning validated IDs. Every card explains its match, tradeoff, and comparison with the winner. **Refine these recommendations** updates the result set and form. **Explore supporting evidence** exposes coverage/provenance/downloads; the group-research explorer loads only when enabled. Dictionary/source/model changes require fresh submission.
 

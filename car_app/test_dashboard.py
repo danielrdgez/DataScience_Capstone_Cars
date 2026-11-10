@@ -323,7 +323,7 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
         catalog = self.category_catalog()
         config = {"similarity_run": "synthetic"}
         with patch("car_app.data.snapshot", return_value=self.source), \
-             patch("car_app.model_registry.registry", side_effect=lambda: dict(config)), \
+             patch("car_app.model_registry.registry", side_effect=lambda **kwargs: dict(config)), \
              patch("car_app.artifacts.stat_key", return_value=()), \
              patch("car_app.recommendation.load_similarity", return_value=catalog), \
              patch("car_app.model_registry.price_estimates", side_effect=lambda rows, config: (rows, None)):
@@ -951,40 +951,16 @@ youtube(SimpleNamespace(identity="fixture"), Filters(makes=("TOYOTA",)))
         self.assertEqual(inventory.loc[inventory.variant.eq("full"), "status"].item(), "pilot_only")
         self.assertNotEqual(compatibility_group(metadata), compatibility_group({**metadata, "split_fingerprint": "different"}))
 
-    def test_ai_uses_newest_completed_checkpoints_across_partial_commands_without_random_forest(self):
-        from car_app.artifacts import recommendation_inventory
-        from MODELS.Price_ML_Models import MODEL_FEATURE_SETS, PREPROCESSING_VERSION
-        root = Path(self.temp.name) / "ai_selection"
-        def checkpoint(variant, name, states, compatible=True):
-            path = root / "MODEL_OUTPUT" / variant / name
-            path.mkdir(parents=True)
-            metadata = {"model_type": variant, "status": "running", "requested_sample_size": None,
-                "requested_models": list(states), "preprocessing_version": PREPROCESSING_VERSION,
-                "raw_feature_columns": list(MODEL_FEATURE_SETS[variant]) if compatible else ["obsolete"],
-                "models": {model: {"status": status} for model, status in states.items()}}
-            (path / "run_metadata.json").write_text(json.dumps(metadata))
-            pd.DataFrame([{"model": model, "mae": 10., "rmse": 20., "validation_mae": 11.}
-                          for model in states]).to_csv(path / "metrics.csv", index=False)
-            pd.DataFrame([{"model": model, "validation_mae": 11.} for model in states]).to_csv(path / "validation_metrics.csv", index=False)
-            for model in states:
-                (path / model).mkdir()
-                (path / model / "predictor.joblib").write_bytes(b"fixture")
-                for partition in ("test", "validation"):
-                    (path / f"{model}_{partition}_predictions.parquet").write_bytes(b"fixture")
-        checkpoint("base", "20260101-full", {"catboost": "completed", "ridge": "completed"})
-        checkpoint("enhanced", "20260102-full", {"catboost": "completed", "ridge": "completed"})
-        checkpoint("full", "20260103-full", {"catboost": "completed", "ridge": "running"})
-        checkpoint("full", "20260104-full", {"ridge": "completed", "random_forest": "completed"})
-        checkpoint("full", "20260105-full", {"ridge": "completed"}, compatible=False)
-        policy = {"recommendation_price_selection": {"feature_sets": ["base", "enhanced", "full"],
-                  "models": ["catboost", "ridge", "random_forest"]}}
-        with patch("car_app.artifacts.ROOT", root):
-            _, choices, statuses, _ = recommendation_inventory(policy)
-        self.assertEqual(len(choices), 6)
-        selected = choices.set_index("label").run.to_dict()
-        self.assertEqual(selected["full-catboost"], "full/20260103-full")
-        self.assertEqual(selected["full-ridge"], "full/20260104-full")
-        self.assertNotIn("random_forest", set(choices.model) | set(statuses.model))
+    def test_ai_pending_oof_never_falls_back_to_dashboard_champion(self):
+        from car_app.agent_context import selected_price_models
+        config = {"recommendation_price": {"kind": "catboost_full_oof_v1", "run": None},
+                  "active_price": {"run": "enhanced/legacy", "model": "ridge"}}
+        with patch("car_app.artifacts.diagnostic_inventory") as inventory:
+            selected = selected_price_models(config)
+        self.assertIsNone(selected["primary"])
+        self.assertNotIn("linear", selected)
+        self.assertTrue(selected["unavailable"])
+        inventory.assert_not_called()
 
     def test_changed_inference_code_requires_frozen_input_and_vin_aligned_prediction_replay(self):
         import hashlib
@@ -1508,23 +1484,13 @@ class AgentTests(unittest.TestCase):
         self.assertIsNone(evidence["safety"]["variants"][0]["OverallRating"])
         self.assertEqual(evidence["nhtsa"]["status"], "unavailable")
 
-    def test_saved_champion_explanations_remain_accessible_when_live_inference_is_blocked(self):
+    def test_oof_does_not_borrow_old_champion_explanations(self):
         from car_app.agent_context import saved_price_explanations, selected_price_models
-        candidates = pd.DataFrame([
-            {"model": "catboost", "run": "full/tree-full", "feature_set": "full", "validation_mae": 1},
-            {"model": "ridge", "run": "enhanced/linear-full", "feature_set": "enhanced", "validation_mae": 2}])
-        importance = pd.DataFrame({"feature": ["horsepower"], "value": [.1]})
-        importance.attrs.update(method="fixture explanation", scale="ln(price in USD)")
         config = {"price_run_selection": {"runs": {"full": "full/tree-full"}}}
-        with patch("car_app.artifacts.diagnostic_inventory", return_value=(None, candidates, None, None)), \
-             patch("car_app.model_registry.validate_price_run", side_effect=ValueError("Code fingerprint differs")), \
-             patch("car_app.model_registry.read_json", return_value={}), \
-             patch("car_app.model_registry.digest", return_value="verified"), \
-             patch("car_app.artifacts.saved_shap", return_value=importance):
-            self.assertIsNone(selected_price_models(config)["tree"])
-            explanations = saved_price_explanations(config)
-            self.assertEqual(explanations["tree"]["global_features"][0]["feature"], "horsepower")
-            self.assertEqual(explanations["linear"]["model"], "ridge")
+        with patch("car_app.artifacts.saved_shap") as shap:
+            self.assertIsNone(selected_price_models(config)["catboost"])
+            self.assertEqual(saved_price_explanations(config), {})
+            shap.assert_not_called()
 
     def test_invalid_ids_references_duplicates_and_provider_failure_use_valid_fallback(self):
         from car_app.agent import AgentAnswer, RankedCandidate, run_turn
@@ -1585,26 +1551,21 @@ class AgentTests(unittest.TestCase):
         self.assertFalse(result["candidates"])
         self.assertFalse(result["answer"]["listings"])
 
-    def test_price_family_selection_rejects_incompatible_and_unselected_models(self):
+    def test_price_selection_only_uses_pinned_full_catboost(self):
         from car_app.agent_context import selected_price_models
-        candidates = pd.DataFrame([
-            {"model": "catboost", "run": "base/old-full", "feature_set": "base", "validation_mae": 1},
-            {"model": "ridge", "run": "enhanced/current-full", "feature_set": "enhanced", "validation_mae": 2},
-            {"model": "catboost", "run": "full/current-full", "feature_set": "full", "validation_mae": 3}])
-        config = {"price_run_selection": {"runs": {"full": "full/current-full"}},
-                  "active_price": {"run": "base/old-full", "model": "catboost"}}
-        def validate(path, model):
-            if "old-full" in str(path):
-                raise ValueError("Code fingerprint differs")
-        with patch("car_app.artifacts.diagnostic_inventory", return_value=(None, candidates, None, None)) as inventory, \
-             patch("car_app.model_registry.validate_price_run", side_effect=validate), \
-             patch("car_app.model_registry.digest", return_value="verified"):
+        from car_app.recommendation_price import oof
+        selection = {"kind": oof.KIND, "run": "recommendation_price/current",
+                     "manifest_sha256": "one", "validation_sha256": "two"}
+        config = {"recommendation_price": selection, "active_price": {"model": "ridge"}}
+        with patch("car_app.recommendation_price.load_bundle", return_value=(Path("fixture"), {"options": {"folds": 10}}, pd.DataFrame())), \
+             patch("car_app.recommendation_price.oof.read_json", return_value={"pooled": {"mae": 1500}}):
             models = selected_price_models(config)
-            inventory.assert_called_with(config["price_run_selection"])
-            self.assertEqual(models["primary"]["model"], "ridge")
-            self.assertEqual(models["tree"]["run"], "full/current-full")
-            self.assertTrue(models["unavailable"])
-            self.assertIsNone(selected_price_models({**config, "price_user_selected": True})["primary"])
+        self.assertEqual(models["primary"]["model"], "catboost")
+        self.assertEqual(models["primary"]["feature_set"], "full")
+        self.assertEqual(models["primary"]["run"], selection["run"])
+        self.assertNotIn("linear", models)
+        with patch("car_app.recommendation_price.load_bundle", side_effect=ValueError("Source changed")):
+            self.assertIsNone(selected_price_models(config)["primary"])
 
     def test_sdk_tools_are_strict_and_validate_user_statement_before_mutation(self):
         import asyncio
@@ -1673,23 +1634,57 @@ similarity_dashboard(None, Filters())
             self.assertFalse(app.exception)
             self.assertNotIn("v6_similarity_reference", app.session_state)
 
-    def test_price_cache_preserves_usd_and_invalidates_on_model_or_source_change(self):
-        from car_app.agent_context import cached_estimates
-        cached_estimates.cache_clear()
-        self.addCleanup(cached_estimates.cache_clear)
-        receipt = json.dumps({"run": "enhanced/current-full", "model": "ridge", "metadata_sha256": "one"})
-        def predict(rows, config):
-            return rows.with_columns(pl.lit(15000.).alias("predicted_price_usd")), None
-        with patch("car_app.model_registry.price_estimates", side_effect=predict) as predicted:
-            self.assertEqual(cached_estimates(("a",), receipt, (("source", 1),)), (("a", 15000.),))
-            cached_estimates(("a",), receipt, (("source", 1),))
-            self.assertEqual(predicted.call_count, 1)
-            cached_estimates(("a",), receipt, (("source", 2),))
-            cached_estimates(("a",), receipt.replace('one', 'two'), (("source", 2),))
-            self.assertEqual(predicted.call_count, 3)
+    def test_oof_prices_preserve_usd_without_final_model_substitution(self):
+        from car_app.recommendation_price import price_evidence
+        selection = {"run": "fixture", "model": "catboost", "feature_set": "full"}
+        bank = pd.DataFrame({"vin": ["a"], "prediction": [15000.], "fold": [3], "predictor_sha256": ["fold-model"]})
+        models = {"catboost": selection, "unavailable": []}
+        with patch("car_app.recommendation_price.load_bundle", return_value=(Path("fixture"), {}, bank)), \
+             patch("car_app.recommendation_price.oof.inference_rows") as inference:
+            result, warnings = price_evidence(pl.DataFrame({"vin": ["a"]}), models)
+            self.assertEqual(result["listing:a"]["catboost"]["predicted_price_usd"], 15000.)
+            self.assertEqual(result["listing:a"]["catboost"]["prediction_kind"], "out_of_fold")
+            self.assertFalse(warnings)
+            inference.assert_not_called()
+            with patch("car_app.recommendation_price.pl.read_parquet", return_value=pl.DataFrame({"vin": ["a", "b"]})):
+                result, warnings = price_evidence(pl.DataFrame({"vin": ["b"]}), models)
+            self.assertEqual(result["listing:b"], {})
+            self.assertTrue(warnings)
+            inference.assert_not_called()
 
-    def test_local_price_button_updates_receipt_without_provider_call(self):
-        from copy import deepcopy
+    def test_oof_cache_is_bound_to_files_and_rejects_changed_pin(self):
+        from car_app import recommendation_price as pricing
+        selection = {"kind": pricing.oof.KIND, "run": "fixture", "manifest_sha256": "one", "validation_sha256": "one"}
+        receipt = {"passed": True, "manifest_sha256": "one", "code": {}}
+        pricing._load.cache_clear()
+        self.addCleanup(pricing._load.cache_clear)
+        signature = (("source", (1, 1)),)
+        with patch.object(pricing.oof, "digest", return_value="one"), \
+             patch.object(pricing.oof, "read_json", return_value=receipt), \
+             patch.object(pricing.oof, "code_hashes", return_value={}), \
+             patch.object(pricing.oof, "validate_bundle", return_value={"reduced_budget": False}) as validate, \
+             patch.object(pricing.pd, "read_parquet", return_value=pd.DataFrame()), \
+             patch.object(pricing, "bundle_signature", return_value=signature) as signatures:
+            pricing._load(json.dumps(selection), signature)
+            pricing._load(json.dumps(selection), signature)
+            self.assertEqual(validate.call_count, 1)
+            signature = (("source", (2, 2)),)
+            signatures.return_value = signature
+            pricing._load(json.dumps(selection), signature)
+            self.assertEqual(validate.call_count, 2)
+            with self.assertRaisesRegex(ValueError, "manifest changed"):
+                pricing._load(json.dumps({**selection, "manifest_sha256": "wrong"}), signature)
+
+    def test_oof_activation_rejects_smoke_bundle_without_touching_registry(self):
+        from car_app.recommendation_price import activate
+        with patch("car_app.recommendation_price.oof.validate_bundle", return_value={"reduced_budget": True}), \
+             patch("car_app.recommendation_price.oof.read_json", return_value={"passed": True}), \
+             patch("car_app.recommendation_price.oof.write_json") as write:
+            with self.assertRaisesRegex(ValueError, "full-budget"):
+                activate(Path("MODEL_OUTPUT/fixture"))
+            write.assert_not_called()
+
+    def test_price_evidence_renders_without_extra_inference_or_provider_call(self):
         from car_app.agent import AgentAnswer, RankedCandidate, run_turn
         async def provider(c, inputs, config):
             c.search()
@@ -1697,24 +1692,21 @@ similarity_dashboard(None, Filters())
             return self.provider_result(AgentAnswer(message="Historical results", questions=[],
                 listings=[RankedCandidate(candidate_id="listing:a", reason="Catalog facts", tradeoff="Condition is unverified.", comparison="Fits the price priority.", source_refs=["listing:a:facts"])], cohorts=[]))
         result = run_turn(self.source, self.requirements, 1, self.categories, "Show results", [], {}, provider=provider)
-        model = {"model": "ridge", "run": "enhanced/current-full", "feature_set": "enhanced", "validation_mae_usd": 1000}
-        result["artifacts"]["price_models"]["linear"] = model
-        updated = deepcopy(result)
-        updated["source_refs"]["listing:a:price_comparison"] = {"models": {"linear": {**model, "predicted_price_usd": 12000}}}
+        model = {"model": "catboost", "run": "fixture", "feature_set": "full", "oof_mae_usd": 1000,
+                 "prediction_kind": "out_of_fold", "fold": 2, "predicted_price_usd": 12000}
+        result["source_refs"]["listing:a:price_evidence"] = {"models": {"catboost": model}}
         script = '''import streamlit as st
 from car_app.agent_ui import render_result
 from car_app.state import RecommendationPanel
 st.session_state.setdefault('panel', RecommendationPanel())
 render_result(RESULT, 'local', st.session_state['panel'], None, {})
 '''.replace("RESULT", repr(result))
-        with patch("car_app.agent_ui.load_price_comparisons", return_value=updated) as load, patch("car_app.agent._provider_run") as remote:
+        with patch("car_app.recommendation_price.oof.inference_rows") as inference, patch("car_app.agent._provider_run") as remote:
             app = AppTest.from_string(script).run()
-            load.assert_not_called()
-            app.button(key="local_prices").click().run()
             self.assertFalse(app.exception)
-            self.assertEqual(load.call_count, 1)
             remote.assert_not_called()
-            self.assertEqual(app.session_state['panel'].agent_result['source_refs']['listing:a:price_comparison']['models']['linear']['predicted_price_usd'], 12000)
+            inference.assert_not_called()
+            self.assertFalse(any(button.key == "local_prices" for button in app.button))
 
     def test_six_ai_cards_submit_once_and_sync_refined_preferences(self):
         from car_app.agent import AgentAnswer, RankedCandidate, run_turn, PreferenceChange
@@ -1836,3 +1828,41 @@ render_result(RESULT, 'local', st.session_state['panel'], None, {})
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TreeLinearPricePolicyTests(unittest.TestCase):
+    def test_selects_each_family_by_validation_not_test_error(self):
+        from car_app.recommendation_price import select_model
+        candidates = pd.DataFrame([
+            {"feature_set": "full", "model": "catboost", "run": "full/a-full", "validation_mae": 10., "test_mae": 90.},
+            {"feature_set": "base", "model": "xgboost", "run": "base/b-full", "validation_mae": 20., "test_mae": 1.},
+            {"feature_set": "full", "model": "ridge", "run": "full/c-full", "validation_mae": 30., "test_mae": 1.},
+            {"feature_set": "full", "model": "multiple_linear_regression", "run": "full/d-full", "validation_mae": 25., "test_mae": 80.}])
+        with patch("car_app.artifacts.diagnostic_inventory", return_value=({}, candidates, None, None)), \
+             patch("car_app.model_registry.digest", return_value="hash"):
+            models = select_model({"recommendation_price": {"kind": "best_tree_linear_v1"}})
+        self.assertEqual(models["tree"]["model"], "catboost")
+        self.assertEqual(models["linear"]["model"], "multiple_linear_regression")
+        self.assertEqual(models["primary"], models["tree"])
+
+    def test_checkpoint_bank_rejects_a_fitting_vin(self):
+        from car_app.recommendation_price import checkpoint_prices
+        rows = pd.DataFrame({"vin": ["training"], "prediction": [100.]})
+        split = pd.DataFrame({"vin": ["training", "testing"], "partition": ["fit", "test"]})
+        with patch("car_app.recommendation_price.check_checkpoint", return_value=Path("fixture")), \
+             patch("car_app.recommendation_price.pd.read_parquet", side_effect=[rows, split]):
+            with self.assertRaisesRegex(ValueError, "held-out"):
+                checkpoint_prices({"model": "catboost"})
+
+    def test_both_estimates_keep_prediction_kind_without_averaging(self):
+        from car_app.recommendation_price import price_evidence
+        models = {"tree": {"model": "catboost"}, "linear": {"model": "ridge"}, "unavailable": []}
+        heldout = pd.DataFrame({"vin": ["a"], "predicted_price_usd": [15000.]})
+        missing = pd.DataFrame({"vin": pd.Series(dtype=str), "predicted_price_usd": pd.Series(dtype=float)})
+        with patch("car_app.recommendation_price.checkpoint_prices", side_effect=[heldout, missing]), \
+             patch("car_app.model_registry.price_estimates", return_value=(pl.DataFrame({"vin": ["a"], "predicted_price_usd": [14000.]}), None)):
+            result, warnings = price_evidence(pl.DataFrame({"vin": ["a"]}), models)
+        self.assertFalse(warnings)
+        self.assertEqual(set(result["listing:a"]), {"tree", "linear"})
+        self.assertEqual(result["listing:a"]["tree"]["prediction_kind"], "held_out_test")
+        self.assertEqual(result["listing:a"]["linear"]["prediction_kind"], "supplemental_inference")
