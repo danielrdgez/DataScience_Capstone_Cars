@@ -175,7 +175,7 @@ def taxonomy_body(frame):
     return v2.body_expressions(frame)
 
 
-def aggregate(frame, grain, body_partitions=False):
+def aggregate(frame, grain, body_partitions=False, support_gates=True):
     data = frame if grain == "cohort" else frame.with_columns(pl.lit(None, dtype=pl.String).alias("Trim"))
     data = data.with_columns(pl.col("cohort_complete" if grain == "cohort" else "model_complete").alias("identity_complete"))
     groups = [*r.COHORT, "identity_complete", "body_style", "powertrain"]
@@ -207,10 +207,12 @@ def aggregate(frame, grain, body_partitions=False):
     for field in NUMERIC + EXTRA:
         valid = profiles[field + "_n"].ge(5) & profiles[field + "_iqr"].le(.2 * profiles[field])
         profiles[field + "_state"] = np.where(valid, "observed", np.where(profiles[field + "_n"].eq(0), "unknown", "insufficient_or_heterogeneous"))
-        profiles.loc[~valid, field] = np.nan
+        if support_gates:
+            profiles.loc[~valid, field] = np.nan
     for field in CATEGORICAL + ["drive_family", "VehicleType", "powertrain_state", "drivetrain_state", *SOURCE_FIELDS]:
         profiles[field + "_agreement"] = profiles[field + "_mode_n"] / profiles[field + "_n"].replace(0, np.nan)
-        profiles.loc[profiles[field + "_agreement"].lt(.9), field] = None
+        if support_gates:
+            profiles.loc[profiles[field + "_agreement"].lt(.9), field] = None
     if not body_partitions:
         profiles["body_family"] = profiles.body_style.map(taxonomy.body_family)
     profiles.loc[profiles.powertrain.isin(["battery_electric", "fuel_cell"]), "engine_displacement"] = np.nan

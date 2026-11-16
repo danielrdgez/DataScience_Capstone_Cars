@@ -37,10 +37,11 @@ def body_category(value):
     return next((label for token, label in BODY_LABELS.items() if token in text), "Body unresolved")
 
 
-def prepare(data_dir, output, resume=False):
+def prepare(data_dir, output, resume=False, grouping_version=6):
     hashes = a.source_hashes(data_dir)
     target = a.start(output, "prepare", {"source_hashes": hashes, "excluded_vins": sorted(EXCLUDED_LISTING_VINS),
-                    "body_policy": features.BODY_POLICY}, resume=resume)
+                    "body_policy": features.BODY_POLICY,
+                    **({"grouping_version": 7} if grouping_version == 7 else {})}, resume=resume)
     frame, conflicts = features.join_sources(Path(data_dir))
     frame = features.reconcile_body(frame)
     frame.select("vin", *features.r.COHORT, "body_type", "BodyClass", "listing_body", "decoder_body",
@@ -54,7 +55,7 @@ def prepare(data_dir, output, resume=False):
     for grain in ("cohort", "model"):
         path = target / grain
         path.mkdir(exist_ok=True)
-        profiles, membership = features.aggregate(frame, grain, body_partitions=True)
+        profiles, membership = features.aggregate(frame, grain, body_partitions=True, support_gates=grouping_version != 7)
         profiles = a.normalize_families(profiles)
         profiles["category"] = profiles.body_partition.map(body_category)
         profiles["fallback_level"] = "trim" if grain == "cohort" else "model_body_propulsion"
@@ -109,10 +110,11 @@ def select_fields(data, pairs):
     return selected, audit
 
 
-def fit_specs(prepared, output, smoke=False, resume=False):
+def fit_specs(prepared, output, smoke=False, resume=False, grouping_version=6):
     receipt = a.verify(prepared)
     config = v3.config_for(smoke)
-    target = a.start(output, "fit-specs", {"config": asdict(config)}, [prepared], resume)
+    policy = {"grouping_version": grouping_version} if grouping_version == 7 else {}
+    target = a.start(output, "fit-specs", {"config": asdict(config), **policy}, [prepared], resume)
     for grain in ("cohort", "model"):
         source = Path(prepared) / grain
         path = target / grain
@@ -124,7 +126,7 @@ def fit_specs(prepared, output, smoke=False, resume=False):
         checks, audits, assignments = [], [], []
         for category in sorted(profiles.category.unique()):
             group = profiles.loc[profiles.category.eq(category)].reset_index(drop=True)
-            if category == "Body unresolved":
+            if category == "Body unresolved" and grouping_version == 6:
                 continue
             for fold in range(5):
                 context = a.digest(category)[:12] + f"-fold-{fold}"
@@ -133,20 +135,29 @@ def fit_specs(prepared, output, smoke=False, resume=False):
                 if checkpoint.exists():
                     a.verify(context_path)
                     continue
-                a.start(context_path, "spec-context", {"category": category, "fold": fold, "config": asdict(config)}, [prepared], resume=context_path.exists())
+                a.start(context_path, "spec-context", {"category": category, "fold": fold, "config": asdict(config), **policy}, [prepared], resume=context_path.exists())
                 data = group.copy()
                 data["development"] = data.fold.ne(fold)
-                fields, audit = select_fields(data, pairs)
-                eligible = v3.eligible(data, fields)
+                if grouping_version == 7:
+                    from MODELS import vehicle_similarity_v7 as v7
+                    fields, audit = v7.select_fields(data)
+                    eligible = pd.Series(True, index=data.index)
+                else:
+                    fields, audit = select_fields(data, pairs)
+                    eligible = v3.eligible(data, fields)
                 data["eligible"] = eligible
                 training = data.loc[data.development & eligible]
                 print(grain, category, "fold", fold, "supported development profiles", len(training), flush=True)
-                accepted, experiments, sensitivities = v5.discover(training, fields, config)
+                if grouping_version == 7:
+                    accepted, experiments, sensitivities = v7.discover(training, fields, config)
+                else:
+                    accepted, experiments, sensitivities = v5.discover(training, fields, config)
                 winner = next((m for m in ("gower", "hierarchical", "kmeans") if m in accepted), None)
                 metric = v3.fit_metric(training, fields) if len(training) and fields else None
                 labels = np.full(len(data), -1, dtype=int)
                 if winner:
-                    labels[eligible] = v5.assign(accepted[winner], data.loc[eligible])
+                    labels[eligible] = (v7.assign(accepted[winner], data.loc[eligible]) if grouping_version == 7
+                                        else v5.assign(accepted[winner], data.loc[eligible]))
                 descriptions = {}
                 for cluster in sorted(set(labels) - {-1}):
                     subset = data.loc[(labels == cluster) & data.development]
@@ -166,8 +177,11 @@ def fit_specs(prepared, output, smoke=False, resume=False):
                 pd.DataFrame(sensitivities).to_csv(context_path / "sensitivities.csv", index=False)
                 pd.DataFrame(audit).to_csv(context_path / "feature_support.csv", index=False)
                 numeric = [f for f in fields if f in NUMERIC]
-                a.project(context_path / "projection", data[numeric].to_numpy(float), data.profile_id.to_numpy(),
-                          (data.development & eligible).to_numpy(), names=numeric, standardize=True)
+                if grouping_version == 7:
+                    v7.project(context_path / "projection", data, numeric)
+                else:
+                    a.project(context_path / "projection", data[numeric].to_numpy(float), data.profile_id.to_numpy(),
+                              (data.development & eligible).to_numpy(), names=numeric, standardize=True)
                 a.finish(context_path, category=category, fold=fold, fields=fields, selected_method=winner,
                          training_families=sorted(training.family_block.unique()), reduced_budget=smoke)
         # Context files are the resume unit. Rebuild these compact indexes after all contexts finish.
@@ -180,7 +194,7 @@ def fit_specs(prepared, output, smoke=False, resume=False):
             assignments.append(rows)
         pd.concat(assignments, ignore_index=True).to_parquet(path / "assignments.parquet", index=False) if assignments else pd.DataFrame(
             columns=["profile_id", "eligible", "cluster", "description", "status", "context", "fold"]).to_parquet(path / "assignments.parquet", index=False)
-    a.finish(target, prepared=str(Path(prepared).resolve()), source_hashes=receipt["source_hashes"],
+    a.finish(target, **policy, prepared=str(Path(prepared).resolve()), source_hashes=receipt["source_hashes"],
              source_directory=receipt["source_directory"], reduced_budget=smoke)
     return target
 
@@ -226,9 +240,76 @@ def attach(specs, text, output, resume=False):
                   group.fold.ne(0).to_numpy(), names=fields, standardize=True)
     if a.source_hashes(spec_receipt["source_directory"]) != spec_receipt["source_hashes"]:
         raise ValueError("Source snapshot changed before evidence attachment")
-    a.finish(target, specs=str(Path(specs).resolve()), text=str(Path(text).resolve()),
+    a.finish(target, grouping_version=spec_receipt.get("grouping_version", 6), specs=str(Path(specs).resolve()), text=str(Path(text).resolve()),
              source_hashes=spec_receipt["source_hashes"], source_directory=spec_receipt["source_directory"],
              periods=text_receipt["periods"], reduced_budget=spec_receipt["reduced_budget"] or text_receipt["reduced_budget"])
+    return target
+
+
+def compare_prepared(original, current):
+    """Require identical discovery inputs, allowing only physical row ordering to differ."""
+    previous, refreshed = a.verify(original), a.verify(current)
+    if previous["stage"] != "prepare" or refreshed["stage"] != "prepare":
+        raise ValueError("Source refresh requires two completed preparation stages")
+    if set(previous["artifacts"]) != set(refreshed["artifacts"]):
+        raise ValueError("Prepared artifact inventory changed; rebuild the bundle")
+    checks = []
+    for relative in previous["artifacts"]:
+        old_path, new_path = Path(original) / relative, Path(current) / relative
+        read = pd.read_parquet if old_path.suffix == ".parquet" else pd.read_csv
+        left, right = read(old_path), read(new_path)
+        if "vin" in left:
+            keys = ["vin"]
+        elif "ratio" in left:
+            keys = ["profile_id", "ratio"]
+        elif "profile_id" in left:
+            keys = ["profile_id"]
+        else:
+            keys = [c for c in left if c != "listings"]
+        try:
+            pd.testing.assert_frame_equal(
+                left.sort_values(keys).reset_index(drop=True),
+                right.sort_values(keys).reset_index(drop=True), check_exact=True,
+            )
+        except (AssertionError, KeyError, ValueError) as exc:
+            raise ValueError(f"Prepared discovery inputs changed: {relative}; rebuild the bundle") from exc
+        checks.append({"artifact": relative, "rows": len(left), "identical": True})
+    return checks
+
+
+def refresh_sources(run, prepared, output):
+    """Reuse validated fits only after exact preparation replay and unchanged NHTSA evidence."""
+    verified = set()
+    receipt, current = a.verify(run, seen=verified), a.verify(prepared, seen=verified)
+    if receipt["stage"] != "attach-evidence" or receipt.get("reduced_budget"):
+        raise ValueError("Source refresh requires a completed full discovery bundle")
+    hashes = a.source_hashes(current["source_directory"])
+    if hashes != current["source_hashes"]:
+        raise ValueError("Current sources changed after preparation")
+    for table in ("NHTSA_Complaints", "NHTSA_Recalls", "NHTSA_Safety"):
+        name = table + ".parquet"
+        if hashes[name] != receipt["source_hashes"][name]:
+            raise ValueError(f"NHTSA evidence changed: {table}; rebuild the bundle")
+    specs = a.verify(receipt["specs"], seen=verified)
+    text = a.verify(receipt["text"], seen=verified)
+    original = specs["dependencies"][0]
+    if original not in text["dependencies"]:
+        raise ValueError("Specification and text preparations differ")
+    checks = compare_prepared(original["directory"], prepared)
+    target = a.start(output, "attach-evidence", {"refresh_sources": True}, [run, prepared])
+    for relative in receipt["artifacts"]:
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(Path(run) / relative, destination)
+    a.write_json(target / "source_refresh.json", {
+        "original_bundle": a.dependency(run), "prepared": a.dependency(prepared),
+        "checks": checks, "unchanged_nhtsa_evidence": True,
+        "method": "Exact prepared-table replay; existing fitted artifacts preserved without refitting",
+    })
+    if a.source_hashes(current["source_directory"]) != hashes:
+        raise ValueError("Sources changed during source refresh")
+    a.finish(target, grouping_version=receipt.get("grouping_version", 6), specs=receipt["specs"], text=receipt["text"], source_hashes=hashes,
+             source_directory=current["source_directory"], periods=receipt["periods"], reduced_budget=False)
     return target
 
 
@@ -251,6 +332,26 @@ def validate(run, output, resume=False):
             query = profiles.loc[profiles.fold.eq(model["held_out_fold"])]
             if set(query.family_block) & set(model["training_families"]):
                 raise ValueError("Query family leaked into specification fitting")
+            if receipt.get("grouping_version") == 7:
+                rows = pd.read_parquet(file.parent / "assignments.parquet")
+                expected = profiles.loc[profiles.category.eq(model["category"]), "profile_id"]
+                if (rows.profile_id.duplicated().any() or set(rows.profile_id) != set(expected)
+                        or not rows.eligible.all() or not rows.cluster.ge(0).all()
+                        or not rows.status.eq("assigned").all()):
+                    raise ValueError("V7 must assign every profile in each context")
+                from MODELS import vehicle_similarity_v7 as v7
+                replay = profiles.set_index("profile_id").loc[rows.profile_id].reset_index()
+                if not np.array_equal(rows.cluster.to_numpy(), v7.assign(model["model"], replay)):
+                    raise ValueError("V7 assignment replay failed")
+                points = pd.read_parquet(file.parent / "projection/points.parquet")
+                if points.entity_id.duplicated().any() or set(points.entity_id) != set(expected):
+                    raise ValueError("V7 group map must include every profile")
+        if receipt.get("grouping_version") == 7:
+            assignments = pd.read_parquet(specs / grain / "assignments.parquet")
+            if (assignments.duplicated(["profile_id", "fold"]).any()
+                    or len(assignments) != 5 * len(profiles)
+                    or not assignments.groupby("profile_id").fold.nunique().reindex(profiles.profile_id).eq(5).all()):
+                raise ValueError("V7 context coverage is incomplete")
         checks.append({"check": grain + " memberships and fold isolation", "passed": True})
     for period in receipt["periods"]:
         records = pd.read_parquet(text / period / "records.parquet")
@@ -361,7 +462,8 @@ def compare_peers(run, output, resume=False):
 
 
 def activate(run, validation):
-    receipt, checked = a.verify(run), a.verify(validation)
+    verified = set()
+    receipt, checked = a.verify(run, seen=verified), a.verify(validation, seen=verified)
     if receipt["reduced_budget"] or not checked.get("passed") or checked["run"] != a.dependency(run):
         raise ValueError("Activation requires a matching full validated bundle")
     config_path = a.ROOT / "car_app/artifact_registry.json"
@@ -376,7 +478,8 @@ def activate(run, validation):
             backup.write_bytes(original)
         config.update(discovery_run=str(Path(run).resolve().relative_to(a.ROOT / "MODEL_OUTPUT")).replace("\\", "/"),
                       discovery_manifest_sha256=a.file_hash(Path(run) / "manifest.json"),
-                      discovery_validation=str(Path(validation).resolve()), recommendation_policy_version=3)
+                      discovery_validation=str(Path(validation).resolve()),
+                      recommendation_policy_version=max(3, config.get("recommendation_policy_version", 3)))
         if config_path.read_bytes() != original:
             raise ValueError("Registry changed concurrently")
         a.write_json(config_path, config)
@@ -386,15 +489,16 @@ def activate(run, validation):
     return backup
 
 
-def main():
+def main(grouping_version=6):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=["check-dependencies", "preflight", "prepare", "fit-specs", "attach-evidence", "compare-peers", "validate", "activate"])
+    parser.add_argument("stage", choices=["check-dependencies", "preflight", "prepare", "fit-specs", "attach-evidence", "refresh-sources", "compare-peers", "validate", "activate"])
     for name in ("data-dir", "prepared", "specs", "text", "run", "validation", "output"):
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
     required = {"check-dependencies": [], "preflight": ["data_dir"], "prepare": ["data_dir", "output"], "fit-specs": ["prepared", "output"], "compare-peers": ["run", "output"],
+                "refresh-sources": ["run", "prepared", "output"],
                 "attach-evidence": ["specs", "text", "output"], "validate": ["run", "output"], "activate": ["run", "validation"]}
     for name in required[args.stage]:
         if getattr(args, name) is None:
@@ -414,11 +518,13 @@ def main():
         print({"source_hashes": a.source_hashes(args.data_dir), "source_directory": str(args.data_dir.resolve())})
         return
     if args.stage == "prepare":
-        result = prepare(args.data_dir, args.output, args.resume)
+        result = prepare(args.data_dir, args.output, args.resume, grouping_version)
     elif args.stage == "fit-specs":
-        result = fit_specs(args.prepared, args.output, args.smoke, args.resume)
+        result = fit_specs(args.prepared, args.output, args.smoke, args.resume, grouping_version)
     elif args.stage == "attach-evidence":
         result = attach(args.specs, args.text, args.output, args.resume)
+    elif args.stage == "refresh-sources":
+        result = refresh_sources(args.run, args.prepared, args.output)
     elif args.stage == "validate":
         result = validate(args.run, args.output, args.resume)
     elif args.stage == "compare-peers":

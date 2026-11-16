@@ -230,9 +230,28 @@ class Snapshot:
         ).select(columns).unique(subset=["Make", "comment_id"], maintain_order=True)
           .head(limit).collect())
 
+    def youtube_trace(self, filters, directory=None, as_of=None):
+        """Return every saved clause for one eligible comment, not just its first clause."""
+        example = self.youtube_comments(filters, limit=1, directory=directory, as_of=as_of)
+        if example.is_empty():
+            return pl.DataFrame()
+        directory = Path(directory) if directory else self.directory.parents[1] / DEFAULT_PRICE_FEATURE_DIRECTORY.relative_to(ROOT)
+        row = example.row(0, named=True)
+        columns = ["Make", "comment_id", "video_id", "video_title", "published_date", "text",
+                   "evidence_start", "evidence_end", "evidence_text", "topics", "content_label",
+                   "overall_polarity", "feature_eligible", "development_excluded",
+                   "direct_price_mention", "model_truncated", "windowed"]
+        return (pl.scan_parquet(sorted((directory.parent / "scored/shards").glob("*.parquet")))
+                .filter((pl.col("Make") == row["Make"])
+                        & (pl.col("comment_id") == row["comment_id"])
+                        & (pl.col("attribution_scope") == "explicit_comment"))
+                .select(columns).sort("evidence_start", "evidence_end").collect())
+
 
 @st.cache_resource(max_entries=2, show_spinner=False)
-def snapshot_at(signature: tuple):
+def snapshot_at(signature: tuple, source_revision: str):
+    # Streamlit can retain instances of the old class across module reloads.
+    # The revision participates in the cache key even when data is unchanged.
     return Snapshot()
 
 
@@ -242,7 +261,8 @@ def snapshot():
     paths.extend(path for name in ("make_features.parquet", "price_feature_manifest.json")
                  if (path := DEFAULT_PRICE_FEATURE_DIRECTORY / name).is_file())
     signature = tuple((str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in paths)
-    return snapshot_at(signature)
+    source_revision = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    return snapshot_at(signature, source_revision)
 
 
 @st.cache_data(max_entries=32, ttl=900, show_spinner=False)
@@ -286,6 +306,9 @@ def query_snapshot(identity: str, filters: Filters, operation: str, *args):
     if operation == "youtube_comments":
         return source.youtube_comments(filters, directory=args[0] if args else None,
                                        as_of=args[1] if len(args) > 1 else None)
+    if operation == "youtube_trace":
+        return source.youtube_trace(filters, directory=args[0] if args else None,
+                                    as_of=args[1] if len(args) > 1 else None)
     if operation == "youtube":
         return source.youtube(filters, directory=args[0] if args else None)
     raise ValueError("Unsupported query")

@@ -16,7 +16,7 @@ import time
 from typing import Literal
 
 import polars as pl
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from car_app.agent_context import RecommendationContext, clean, identity, dictionary_context
 from car_app.data import ROOT
@@ -27,6 +27,25 @@ MAX_TURNS = 5
 DEADLINE_SECONDS = 120
 MAX_CONTEXT_CHARS = 128000
 RESULT_SCHEMA_VERSION = 4
+RETRYABLE_VALIDATION_ERRORS = frozenset({
+    "Response exceeds the shortlist limits",
+    "Duplicate recommendation IDs",
+    "Unknown candidate or unsupported evidence reference",
+    "Explain the match, tradeoff and comparison for every recommendation",
+    "Mileage and fuel-economy units are unverified; use source units",
+    "Recommended vehicles require a decoded make and model",
+    "Return distinct Make/Model families, rather than repeated years or trims",
+    "Retrieve recommendation evidence for every final listing before answering",
+})
+
+
+def response_validation_message(exc):
+    """Expose only application-owned validation messages, never provider output."""
+    if isinstance(exc, ValidationError):
+        return "The AI response did not match the required response format."
+    if type(exc) is ValueError and str(exc) in RETRYABLE_VALIDATION_ERRORS:
+        return str(exc)
+    return None
 
 
 @dataclass(frozen=True)
@@ -428,10 +447,29 @@ def run_turn(source, requirements, revision, categories, message, messages, conf
     conversation.context_chars = len(inputs[0]["content"])
 
     async def execute():
-        nonlocal provider_called
-        provider_called = True
-        return await asyncio.wait_for((provider or _provider_run)(conversation, inputs, provider_config),
-                                      timeout=max(.1, conversation.deadline - time.monotonic()))
+        nonlocal provider_called, usage
+        current_inputs = inputs
+        for attempt in range(2):
+            conversation.check()
+            provider_called = True
+            result = await asyncio.wait_for((provider or _provider_run)(conversation, current_inputs, provider_config),
+                                            timeout=max(.1, conversation.deadline - time.monotonic()))
+            raw_usage = result.context_wrapper.usage
+            for name in ("requests", "input_tokens", "output_tokens", "total_tokens"):
+                usage[name] = usage.get(name, 0) + (getattr(raw_usage, name, 0) or 0)
+            try:
+                return conversation.validate(AgentAnswer.model_validate(result.final_output))
+            except ValueError as exc:
+                detail = response_validation_message(exc)
+                if detail:
+                    conversation.validation_errors.append(detail)
+                if not detail or attempt or not callable(getattr(result, "to_input_list", None)):
+                    raise
+                current_inputs = result.to_input_list() + [{"role": "user", "content":
+                    "The proposed response was rejected by the application: " + detail + ". "
+                    "Correct the response using the existing tool results and current requirements. "
+                    "If evidence was not delivered for every final listing, call get_recommendation_evidence first. "
+                    "Do not relax the requirements or invent IDs or evidence."}]
     try:
         if provider is None and not provider_config.api_key:
             failure = "missing_credentials"
@@ -439,10 +477,7 @@ def run_turn(source, requirements, revision, categories, message, messages, conf
                 conversation.search()
             answer = fallback_answer(conversation, "OpenAI credentials are unavailable. Deterministic search remains available.")
         else:
-            result = asyncio.run(execute())
-            answer = conversation.validate(AgentAnswer.model_validate(result.final_output))
-            raw_usage = result.context_wrapper.usage
-            usage = {k: getattr(raw_usage, k, 0) for k in ("requests", "input_tokens", "output_tokens", "total_tokens")}
+            answer = asyncio.run(execute())
     except Exception as exc:
         name = type(exc).__name__
         failure = {"AuthenticationError": "authentication", "PermissionDeniedError": "model_access",
@@ -458,6 +493,7 @@ def run_turn(source, requirements, revision, categories, message, messages, conf
         answer = fallback_answer(conversation, "The AI response was unavailable or failed validation. Showing available deterministic results.")
         if not conversation.current():
             conversation.context = None
+            failure = "stale_context"
             answer = fallback_answer(conversation, "The source or model changed. Submit again to retrieve current results.")
     context = conversation.context
     if not conversation.current():

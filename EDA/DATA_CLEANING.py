@@ -456,6 +456,8 @@ def export_parquet(database_path: Path = DATABASE_PATH,
     import pyarrow.parquet as pq
 
     _validate_tables(table_names)
+    if "nhtsa_vpic_decodes" in table_names and "used_cars" not in table_names:
+        raise ValueError("Export used_cars with nhtsa_vpic_decodes to align retained VINs")
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if not database_path.is_file():
@@ -543,6 +545,15 @@ def export_parquet(database_path: Path = DATABASE_PATH,
                         "manual_excluded_vins": sorted(EXCLUDED_LISTING_VINS),
                         "rows_removed_for_reviewed_vins": removed_review_rows,
                     }
+        if "nhtsa_vpic_decodes" in table_names:
+            vpic_path = staging / PARQUET_FILES["nhtsa_vpic_decodes"]
+            aligned = staging / "aligned-vpic.parquet"
+            alignment = align_vpic_parquet(staging / PARQUET_FILES["used_cars"],
+                                          vpic_path, aligned, batch_size)
+            aligned.replace(vpic_path)
+            metadata = manifest["tables"]["nhtsa_vpic_decodes"]
+            metadata.update(rows=alignment["listing_rows"], bytes=vpic_path.stat().st_size,
+                            listing_alignment=alignment)
         (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         backup = output_dir.with_name(f".{output_dir.name}.backup-{uuid.uuid4().hex}")
         had_existing_output = output_dir.exists()
@@ -559,6 +570,100 @@ def export_parquet(database_path: Path = DATABASE_PATH,
         if had_existing_output:
             shutil.rmtree(backup)
     print(f"Saved dataset: {output_dir}", flush=True)
+    return manifest
+
+
+def align_vpic_parquet(listing_path: Path, vpic_path: Path, output_path: Path,
+                       batch_size: int = BATCH_SIZE) -> dict:
+    """Keep one vPIC row per retained VIN; absent decodes have null source fields.
+
+    Never use decoder VIN or listing attributes to fabricate decoded values.
+    Ambiguous retained VINs abort instead of multiplying or arbitrarily choosing rows.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    if batch_size <= 0 or output_path.resolve() in {listing_path.resolve(), vpic_path.resolve()}:
+        raise ValueError("Use a separate output path and a positive batch size")
+    listings = pl.scan_parquet(listing_path).select("vin").collect()
+    if (listings["vin"].null_count() or listings["vin"].n_unique() != listings.height
+            or listings["vin"].str.strip_chars().eq("").any()):
+        raise ValueError("Retained listing vin must be nonblank, non-null and unique")
+    vpic = pl.scan_parquet(vpic_path)
+    source_columns = [name for name in vpic.collect_schema() if name != "vin"]
+    if not source_columns:
+        raise ValueError("vPIC must contain source fields in addition to lowercase vin")
+    decodes = vpic.select("vin", pl.any_horizontal(
+        pl.col(name).is_not_null() for name in source_columns
+    ).alias("_has_source_record")).collect()
+    retained = decodes.join(listings, on="vin", how="semi")
+    if retained["vin"].n_unique() != retained.height:
+        raise ValueError("Multiple decode rows for a retained vin; resolve model-year hints first")
+    missing = listings.join(retained.select("vin"), on="vin", how="anti")
+    matched_count = int(retained["_has_source_record"].sum())
+    with pq.ParquetFile(vpic_path) as source:
+        schema = source.schema_arrow
+        keys = listings["vin"].to_arrow()
+        with pq.ParquetWriter(output_path, schema, compression="zstd") as writer:
+            for batch in source.iter_batches(batch_size=batch_size):
+                table = pa.Table.from_batches([batch])
+                keep = pc.fill_null(pc.is_in(table["vin"], value_set=keys), False)
+                writer.write_table(table.filter(keep), row_group_size=batch_size)
+            for start in range(0, missing.height, batch_size):
+                vins = missing.slice(start, batch_size)["vin"].to_list()
+                columns = [pa.array(vins, type=field.type) if field.name == "vin"
+                           else pa.nulls(len(vins), type=field.type) for field in schema]
+                writer.write_table(pa.Table.from_arrays(columns, schema=schema))
+    actual = pl.scan_parquet(output_path).select("vin").collect()
+    if (actual.height != listings.height or actual["vin"].n_unique() != actual.height
+            or actual.join(listings, on="vin", how="anti").height
+            or listings.join(actual, on="vin", how="anti").height
+            or pq.read_schema(output_path) != schema):
+        raise RuntimeError("Aligned vPIC schema or VIN population differs from retained listings")
+    return {"policy": "one row per retained lowercase vin; missing decode fields remain null",
+            "aligned_at_utc": datetime.now(timezone.utc).isoformat(),
+            "listing_rows": listings.height, "input_vpic_rows": decodes.height,
+            "matched_decode_rows": matched_count,
+            "missing_decode_rows": listings.height - matched_count,
+            "out_of_population_rows_removed": decodes.height - retained.height}
+
+
+def align_saved_vpic(dataset_path: Path = FINAL_DATASET_PATH,
+                     batch_size: int = BATCH_SIZE) -> dict:
+    """Align an existing snapshot without rerunning listing or other source exports."""
+    dataset_path = dataset_path.resolve()
+    listing = dataset_path / PARQUET_FILES["used_cars"]
+    vpic = dataset_path / PARQUET_FILES["nhtsa_vpic_decodes"]
+    manifest_path = dataset_path / "manifest.json"
+    signatures = {p: (p.stat().st_size, p.stat().st_mtime_ns)
+                  for p in (listing, vpic, manifest_path)}
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    with TemporaryDirectory(prefix=".vpic-align-", dir=dataset_path) as temporary:
+        staged = Path(temporary) / vpic.name
+        alignment = align_vpic_parquet(listing, vpic, staged, batch_size)
+        metadata = manifest["tables"]["nhtsa_vpic_decodes"]
+        metadata.update(rows=alignment["listing_rows"], bytes=staged.stat().st_size,
+                        listing_alignment=alignment)
+        if alignment["listing_rows"] != manifest["tables"]["used_cars"]["rows"]:
+            raise ValueError("Listing row count differs from its manifest")
+        staged_manifest = Path(temporary) / manifest_path.name
+        staged_manifest.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        if any((p.stat().st_size, p.stat().st_mtime_ns) != signature
+               for p, signature in signatures.items()):
+            raise RuntimeError("Snapshot changed during alignment; refusing to publish")
+        backup = dataset_path / f".vpic-alignment-backup-{uuid.uuid4().hex}"
+        backup.mkdir()
+        shutil.copy2(vpic, backup / vpic.name)
+        shutil.copy2(manifest_path, backup / manifest_path.name)
+        try:
+            staged.replace(vpic)
+            staged_manifest.replace(manifest_path)
+        except Exception:
+            shutil.copy2(backup / vpic.name, vpic)
+            shutil.copy2(backup / manifest_path.name, manifest_path)
+            raise
+    print(json.dumps(alignment, indent=2), flush=True)
     return manifest
 
 
@@ -599,6 +704,13 @@ if __name__ == "__main__":
                         help="Candidate file from cohort_price_mileage_review; defaults to the latest run.")
     parser.add_argument("--table", action="append", choices=TABLES_TO_LOAD,
                         help="Export selected tables; repeat to select several. Default: all six tables.")
+    parser.add_argument("--align-vpic-only", action="store_true",
+                        help="Align saved vPIC to saved listings; preserve the other snapshot tables.")
     args = parser.parse_args()
-    export_parquet(args.database, args.output_dir, args.batch_size,
-                   tuple(args.table) if args.table else TABLES_TO_EXPORT, args.cohort_review_csv)
+    if args.align_vpic_only:
+        if args.table or args.cohort_review_csv:
+            parser.error("--align-vpic-only cannot be combined with export filters")
+        align_saved_vpic(args.output_dir, args.batch_size)
+    else:
+        export_parquet(args.database, args.output_dir, args.batch_size,
+                       tuple(args.table) if args.table else TABLES_TO_EXPORT, args.cohort_review_csv)

@@ -17,6 +17,7 @@ from DATA_CLEANING import (
     USED_CARS_INTEGER_COLUMNS, USED_CARS_UNITS, TABLES_TO_EXPORT,
     INTEGER_COLUMNS, FLOAT_COLUMNS, PARQUET_FILES,
     EXCLUDED_LISTING_VINS,
+    align_vpic_parquet,
 )
 
 
@@ -141,10 +142,11 @@ class ParquetExportTests(unittest.TestCase):
                     ('a', '', None, None, '', '0'), ('b', '12.5', '66.5 in', '2020-01-01', '00960', '100'),
                     ('c', '12.49', '--', 'invalid', None, '200'),
                 ])
-                connection.execute('CREATE TABLE nhtsa_vpic_decodes (vpic_Doors TEXT, vpic_BasePrice TEXT, fetched_at TEXT, vpic_ABS TEXT)')
-                connection.executemany('INSERT INTO nhtsa_vpic_decodes VALUES (?,?,?,?)', [
-                    ('04', '1.5', '2026-09-25 20:23:26', None),
-                    ('4.0', '2.0', '2026-09-25 20:23:27', 'Standard'),
+                connection.execute('CREATE TABLE nhtsa_vpic_decodes (vin TEXT, vpic_Doors TEXT, vpic_BasePrice TEXT, fetched_at TEXT, vpic_ABS TEXT)')
+                connection.executemany('INSERT INTO nhtsa_vpic_decodes VALUES (?,?,?,?,?)', [
+                    ('a', '04', '1.5', '2026-09-25 20:23:26', None),
+                    ('b', '4.0', '2.0', '2026-09-25 20:23:27', 'Standard'),
+                    ('outside', '2', '9.0', '2026-09-25 20:23:28', 'Optional'),
                 ])
                 connection.execute('CREATE TABLE nhtsa_recalls (query_id INTEGER, record_json TEXT)')
             connection.close()
@@ -164,9 +166,14 @@ class ParquetExportTests(unittest.TestCase):
             self.assertEqual(actual['height'].to_list(), [None, 66.5, None])
             self.assertEqual(actual['listed_date'].dtype, pl.Date)
             vpic = scan_final_table('nhtsa_vpic_decodes', output).collect()
-            self.assertEqual(vpic['Doors'].to_list(), [4, 4])
+            self.assertEqual(vpic['vin'].to_list(), ['a', 'b', 'c'])
+            self.assertEqual(vpic['Doors'].to_list(), [4, 4, None])
             self.assertEqual(vpic['BasePrice'].dtype, pl.Float64)
-            self.assertEqual(vpic['ABS'].to_list(), [None, 'Standard'])
+            self.assertEqual(vpic['ABS'].to_list(), [None, 'Standard', None])
+            alignment = report['tables']['nhtsa_vpic_decodes']['listing_alignment']
+            self.assertEqual(alignment['matched_decode_rows'], 2)
+            self.assertEqual(alignment['missing_decode_rows'], 1)
+            self.assertEqual(alignment['out_of_population_rows_removed'], 1)
             empty = scan_final_table('nhtsa_recalls', output).collect()
             self.assertEqual(empty.schema, {'query_id': pl.Int64})
             batches = list(load_final_data(output, batch_size=2, table_names=("used_cars",)))
@@ -220,6 +227,34 @@ class ParquetExportTests(unittest.TestCase):
 
 
 class NHTSATransformationTests(unittest.TestCase):
+    def test_alignment_preserves_decodes_and_rejects_ambiguous_retained_vins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            listings = root / 'listings.parquet'
+            decodes = root / 'decodes.parquet'
+            aligned = root / 'aligned.parquet'
+            pl.DataFrame({'vin': ['a', 'b'], 'make_name': ['listing a', 'listing b']}).write_parquet(listings)
+            source = pl.DataFrame({'vin': ['outside', 'a'], 'VIN': ['b', 'decoder a'],
+                                   'Make': ['discard', 'decoded a'], 'ModelYear': [1999, 2020]})
+            source.write_parquet(decodes)
+            receipt = align_vpic_parquet(listings, decodes, aligned, batch_size=1)
+            result = pl.read_parquet(aligned)
+            self.assertEqual(result.filter(pl.col('vin') == 'a').to_dicts(),
+                             source.filter(pl.col('vin') == 'a').to_dicts())
+            self.assertEqual(result.filter(pl.col('vin') == 'b').to_dicts(),
+                             [{'vin': 'b', 'VIN': None, 'Make': None, 'ModelYear': None}])
+            self.assertEqual(receipt['missing_decode_rows'], 1)
+            repeated = root / 'repeated.parquet'
+            again = align_vpic_parquet(listings, aligned, repeated, batch_size=1)
+            self.assertEqual(again['matched_decode_rows'], 1)
+            self.assertEqual(again['missing_decode_rows'], 1)
+            self.assertTrue(pl.read_parquet(repeated).equals(result))
+            before = aligned.read_bytes()
+            pl.concat([source, source.filter(pl.col('vin') == 'a')]).write_parquet(decodes)
+            with self.assertRaisesRegex(ValueError, 'Multiple decode rows'):
+                align_vpic_parquet(listings, decodes, aligned, batch_size=1)
+            self.assertEqual(aligned.read_bytes(), before)
+
     def test_all_vpic_numeric_fields(self):
         source = {('model_year_hint' if c == 'model_year_hint' else 'vpic_' + c):
                   ['2.5', '-2.5', 'bad', None] for c in INTEGER_COLUMNS}
@@ -249,7 +284,7 @@ class NHTSATransformationTests(unittest.TestCase):
             with sqlite3.connect(database) as connection:
                 connection.execute('CREATE TABLE used_cars (vin TEXT, price TEXT, mileage TEXT)')
                 connection.execute('CREATE TABLE youtube_comments_sentiment (comment_id TEXT, comment TEXT)')
-                connection.execute('CREATE TABLE nhtsa_vpic_decodes (vpic_Doors TEXT)')
+                connection.execute('CREATE TABLE nhtsa_vpic_decodes (vin TEXT, vpic_Doors TEXT)')
                 for table in ('nhtsa_complaints', 'nhtsa_recalls'):
                     connection.execute(f'CREATE TABLE {table} (query_id INTEGER, model_year TEXT, make TEXT, record_json TEXT)')
                     connection.executemany(f'INSERT INTO {table} VALUES (?,?,?,?)',

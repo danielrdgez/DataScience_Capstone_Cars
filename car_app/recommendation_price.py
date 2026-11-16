@@ -166,10 +166,16 @@ def select_checkpoint_models(config):
             continue
         choice = choices.iloc[0]
         path = ROOT / "MODEL_OUTPUT" / choice.run
-        result[family] = {"kind": "saved_checkpoint_v1", "run": choice.run, "model": choice.model,
+        selection = {"kind": "saved_checkpoint_v1", "run": choice.run, "model": choice.model,
             "feature_set": choice.feature_set, "validation_mae_usd": float(choice.validation_mae),
             "selection_metric": "validation_mae_usd", "metadata_sha256": digest(path / "run_metadata.json"),
             "predictor_sha256": digest(path / choice.model / "predictor.joblib")}
+        try:
+            check_checkpoint(selection)
+        except (OSError, ValueError, KeyError, AssertionError, pl.exceptions.PolarsError) as exc:
+            result["unavailable"].append(f"{family.capitalize()} price checkpoint unavailable: {exc}")
+            continue
+        result[family] = selection
     result["primary"] = result["tree"] or result["linear"]
     return result
 

@@ -1349,7 +1349,8 @@ def load_model_frame(
 
 def prepare_prediction_frame(model_type: str, listings: pl.DataFrame, *,
                              expert_feature_dir: Path | None = None,
-                             youtube_feature_dir: Path | None = None) -> pl.DataFrame:
+                             youtube_feature_dir: Path | None = None,
+                             expert_vpic_sha256: str | None = None) -> pl.DataFrame:
     """Assemble model inputs from listing rows without requiring a price label.
 
     Rows join to the saved vPIC snapshot on lowercase ``vin``. Missing source
@@ -1417,7 +1418,7 @@ def prepare_prediction_frame(model_type: str, listings: pl.DataFrame, *,
     if model_type in EXPERT_MODEL_TYPES:
         from EDA.DATA_CLEANING import FINAL_DATASET_PATH
         cohorts, makes, _ = load_expert_features(expert_feature_dir or EXPERT_FEATURE_DIRECTORY,
-            vpic_sha256=file_sha256(FINAL_DATASET_PATH / "NHTSA_vPIC.parquet"))
+            vpic_sha256=expert_vpic_sha256 or file_sha256(FINAL_DATASET_PATH / "NHTSA_vPIC.parquet"))
         frame = join_expert_features(frame, cohorts, makes)
     frame = _normalize_model_feature_strings(
         add_listing_features(add_cohort_groups(frame)), model_features

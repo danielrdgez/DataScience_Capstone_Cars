@@ -1368,6 +1368,111 @@ class CategoryHierarchyTests(unittest.TestCase):
 
 
 class DiscoveryV6Tests(unittest.TestCase):
+    def test_resume_normalizes_config_but_rejects_changed_contracts(self):
+        from dataclasses import asdict
+        from MODELS import discovery_artifacts as a
+        from MODELS.vehicle_similarity_v3 import config_for
+        config = {"config": asdict(config_for()), "grouping_version": 7}
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "specs"
+            a.start(target, "fit-specs", config)
+            before = (target / "stage_state.json").read_bytes()
+            a.start(target, "fit-specs", config, resume=True)
+            self.assertEqual((target / "stage_state.json").read_bytes(), before)
+            changed = {**config, "config": {**config["config"], "clusters": (2, 3)}}
+            with self.assertRaisesRegex(ValueError, "identical inputs"):
+                a.start(target, "fit-specs", changed, resume=True)
+            with patch.object(a, "producer_hashes", return_value={}):
+                with self.assertRaisesRegex(ValueError, "identical inputs"):
+                    a.start(target, "fit-specs", config, resume=True)
+
+    def test_json_write_retries_temporary_lock_and_preserves_existing_receipt(self):
+        from MODELS import discovery_artifacts as a
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "projection.json"
+            a.write_json(target, {"status": "old"})
+            replace = Path.replace
+            attempts = []
+
+            def temporarily_locked(source, destination):
+                attempts.append(source)
+                self.assertEqual(a.read_json(destination), {"status": "old"})
+                if len(attempts) < 3:
+                    raise PermissionError("temporary Windows file lock")
+                return replace(source, destination)
+
+            with patch.object(Path, "replace", temporarily_locked), patch.object(a.time, "sleep"):
+                a.write_json(target, {"status": "new", "missing": np.nan})
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(a.read_json(target), {"status": "new", "missing": None})
+            self.assertEqual(list(Path(directory).glob("*.tmp")), [])
+
+    def test_json_write_persistent_lock_fails_without_destroying_receipt(self):
+        from MODELS import discovery_artifacts as a
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "projection.json"
+            a.write_json(target, {"status": "old"})
+            with patch.object(Path, "replace", side_effect=PermissionError("locked")) as replace, \
+                 patch.object(a.time, "sleep"):
+                with self.assertRaises(PermissionError):
+                    a.write_json(target, {"status": "new"})
+            self.assertEqual(replace.call_count, 9)
+            self.assertEqual(a.read_json(target), {"status": "old"})
+            self.assertEqual(list(Path(directory).glob("*.tmp")), [])
+
+    def test_discovery_activation_preserves_newer_recommendation_policy(self):
+        from MODELS import vehicle_similarity_v6 as discovery
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run, validation = root / "MODEL_OUTPUT/run/bundle", root / "MODEL_OUTPUT/run/validation"
+            run.mkdir(parents=True)
+            validation.mkdir()
+            (root / "car_app").mkdir()
+            discovery.a.write_json(run / "manifest.json", {})
+            dependency = discovery.a.dependency(run)
+            config = {"recommendation_policy_version": 5, "recommendation_price": {"kind": "best_tree_linear_v1"}}
+            discovery.a.write_json(root / "car_app/artifact_registry.json", config)
+            with patch.object(discovery.a, "ROOT", root), patch.object(discovery.a, "verify", side_effect=[
+                    {"reduced_budget": False}, {"passed": True, "run": dependency}]):
+                discovery.activate(run, validation)
+            updated = discovery.a.read_json(root / "car_app/artifact_registry.json")
+            self.assertEqual(updated["recommendation_policy_version"], 5)
+            self.assertEqual(updated["recommendation_price"], config["recommendation_price"])
+            self.assertEqual(updated["discovery_run"], "run/bundle")
+
+    def test_source_refresh_requires_exact_prepared_values_and_population(self):
+        from MODELS import vehicle_similarity_v6 as discovery
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / name for name in ("original", "current")]
+            original = pd.DataFrame({"vin": ["a", "b"], "horsepower": [100., np.nan]})
+
+            def publish(path, frame):
+                path.mkdir(exist_ok=True)
+                frame.to_parquet(path / "memberships.parquet", index=False)
+                discovery.a.write_json(path / "manifest.json", {
+                    "schema_version": discovery.a.VERSION, "status": "completed", "stage": "prepare",
+                    "dependencies": [], "artifacts": {
+                        "memberships.parquet": discovery.a.file_hash(path / "memberships.parquet")}})
+
+            publish(paths[0], original)
+            publish(paths[1], original.iloc[::-1])
+            self.assertEqual(discovery.compare_prepared(*paths)[0]["rows"], 2)
+            for changed in (original.assign(horsepower=[101., np.nan]), original.iloc[:1]):
+                publish(paths[1], changed)
+                with self.assertRaisesRegex(ValueError, "Prepared discovery inputs changed"):
+                    discovery.compare_prepared(*paths)
+
+    def test_source_refresh_rejects_changed_nhtsa_evidence_before_reusing_fits(self):
+        from MODELS import vehicle_similarity_v6 as discovery
+        hashes = {name + ".parquet": "saved" for name in discovery.a.TABLES}
+        bundle = {"stage": "attach-evidence", "reduced_budget": False, "source_hashes": hashes}
+        current = {"source_hashes": {**hashes, "NHTSA_Recalls.parquet": "changed"},
+                   "source_directory": "fixture"}
+        with patch.object(discovery.a, "verify", side_effect=[bundle, current]), \
+             patch.object(discovery.a, "source_hashes", return_value=current["source_hashes"]):
+            with self.assertRaisesRegex(ValueError, "NHTSA evidence changed: NHTSA_Recalls"):
+                discovery.refresh_sources("bundle", "prepared", "output")
+
     def test_source_body_reconciliation_prefers_listing_and_preserves_conflict_flags(self):
         from MODELS.vehicle_profiles_v5 import reconcile_body
         from MODELS.vehicle_similarity_v6 import body_category
@@ -1503,6 +1608,102 @@ class DiscoveryV6Tests(unittest.TestCase):
             self.assertEqual(metadata["fit_entities"], [str(i) for i in range(1, 8)])
         np.testing.assert_array_equal(mask, original)
         self.assertFalse(mask.flags.writeable)
+
+
+class DiscoveryV7Tests(unittest.TestCase):
+    def test_preparation_retains_single_vin_specifications(self):
+        from MODELS import vehicle_similarity_v6 as discovery
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            CategoryWorkflowControls.snapshot(root / "data", 1)
+            listing_path = root / "data/used_cars.parquet"
+            listing = pd.read_parquet(listing_path).head(1)
+            listing.to_parquet(listing_path, index=False)
+            decode_path = root / "data/NHTSA_vPIC.parquet"
+            decodes = pd.read_parquet(decode_path)
+            for field, value in {"VehicleType": "PASSENGER CAR", "DriveType": "FWD", "Seats": 5,
+                                 "EngineCylinders": 4, "EngineHP_to": None, "WheelBaseShort": 100.,
+                                 "WheelBaseLong": 100.}.items():
+                decodes[field] = value
+            decodes.to_parquet(decode_path, index=False)
+            for name in ("NHTSA_Complaints", "NHTSA_Recalls", "NHTSA_Safety"):
+                pl.DataFrame({"unused": [1]}).write_parquet(root / "data" / (name + ".parquet"))
+            discovery.prepare(root / "data", root / "v6")
+            discovery.prepare(root / "data", root / "v7", grouping_version=7)
+            for grain in ("model", "cohort"):
+                old = pd.read_parquet(root / "v6" / grain / "profiles.parquet")
+                new = pd.read_parquet(root / "v7" / grain / "profiles.parquet")
+                self.assertTrue(old.length.isna().all())
+                self.assertEqual(new.length.iloc[0], listing.length.iloc[0])
+                self.assertEqual(new.vin_count.iloc[0], 1)
+
+    def test_forced_groups_cover_every_profile_and_preserve_family_isolation(self):
+        from MODELS import vehicle_similarity_v6 as discovery
+        from MODELS import vehicle_similarity_v7 as v7
+        import joblib
+
+        profiles = pd.DataFrame({
+            "profile_id": ["a", "b", "c", "d"], "family_block": ["A", "B", "C", "D"],
+            "fold": [0, 1, 2, 3], "category": ["Sedan", "Sedan", "Sedan", "Body unresolved"],
+            "identity_complete": [True, False, True, False], "vin_count": [6, 1, 1, 1],
+            "powertrain": ["combustion_unverified", "conflicting", "unknown", "unknown"],
+            "length": [150., np.nan, 210., np.nan], "wheelbase": [90., np.nan, 130., np.nan],
+            "horsepower": [100., np.nan, 300., np.nan]})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepared = discovery.a.start(root / "prepared", "prepare", {})
+            for grain in ("model", "cohort"):
+                path = prepared / grain
+                path.mkdir()
+                profiles.to_parquet(path / "profiles.parquet", index=False)
+                pd.DataFrame({"vin": ["a", "b", "c", "d"], "profile_id": profiles.profile_id}).to_parquet(path / "memberships.parquet", index=False)
+                pd.DataFrame({"profile_id": [], "ratio": []}).to_parquet(path / "horsepower_scale_pairs.parquet", index=False)
+            discovery.a.finish(prepared, source_hashes={}, source_directory=str(root), reduced_budget=False)
+            discover = v7.discover
+            completed = 0
+
+            def interrupt_second_context(*args, **kwargs):
+                nonlocal completed
+                completed += 1
+                if completed == 2:
+                    raise RuntimeError("synthetic interruption")
+                return discover(*args, **kwargs)
+
+            with patch.object(v7, "discover", side_effect=interrupt_second_context):
+                with self.assertRaisesRegex(RuntimeError, "synthetic interruption"):
+                    discovery.fit_specs(prepared, root / "specs", smoke=True, grouping_version=7)
+            saved = list((root / "specs").glob("*/contexts/*/manifest.json"))
+            self.assertEqual(len(saved), 1)
+            original_checkpoint = saved[0].read_bytes()
+            output = discovery.fit_specs(prepared, root / "specs", smoke=True, resume=True, grouping_version=7)
+            self.assertEqual(saved[0].read_bytes(), original_checkpoint)
+            self.assertEqual(discovery.a.verify(output)["grouping_version"], 7)
+            for grain in ("model", "cohort"):
+                rows = pd.read_parquet(output / grain / "assignments.parquet")
+                self.assertEqual(len(rows), 5 * len(profiles))
+                self.assertTrue(rows.cluster.ge(0).all())
+                self.assertTrue(rows.status.eq("assigned").all())
+                self.assertTrue(rows.eligible.all())
+                for file in (output / grain / "contexts").glob("*/retrieval.joblib"):
+                    model = joblib.load(file)
+                    held = profiles.loc[profiles.fold.eq(model["held_out_fold"])]
+                    self.assertFalse(set(held.family_block) & set(model["training_families"]))
+                    original = profiles.loc[profiles.category.eq(model["category"])].reset_index(drop=True)
+                    saved = pd.read_parquet(file.parent / "assignments.parquet")
+                    np.testing.assert_array_equal(saved.cluster, v7.assign(model["model"], original))
+                    points = pd.read_parquet(file.parent / "projection/points.parquet")
+                    self.assertEqual(set(points.entity_id), set(original.profile_id))
+
+    def test_forced_assignment_accepts_missing_and_extreme_values(self):
+        from MODELS import vehicle_similarity_v7 as v7
+        from MODELS.vehicle_similarity_v3 import config_for
+
+        training = pd.DataFrame({"family_block": ["A", "B", "C", "D"],
+                                 "length": [140., 150., 200., 210.]})
+        fitted, _, _ = v7.discover(training, ["length"], config_for(True))
+        rows = pd.DataFrame({"length": [np.nan, 10000., -10000.]})
+        self.assertTrue((v7.assign(fitted["kmeans"], rows) >= 0).all())
 
 
 if __name__ == "__main__":

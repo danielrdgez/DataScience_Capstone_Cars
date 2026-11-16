@@ -107,8 +107,15 @@ def render_vehicle(item, candidate, rank):
 
 def render_result(result, key, panel=None, source=None, config=None, legacy=None):
     failure = result["telemetry"]["failure_category"]
+    if any("price checkpoint unavailable" in warning.lower() for warning in result.get("warnings", [])):
+        st.warning("Some saved price estimates are unavailable because their model artifacts or source data no longer match. Recommendations can still use the observed listing price.")
     if failure:
         st.warning("AI recommendations are unavailable (" + failure.replace("_", " ") + "). Retry below.")
+        from car_app.agent import RETRYABLE_VALIDATION_ERRORS
+        safe_errors = RETRYABLE_VALIDATION_ERRORS | {"The AI response did not match the required response format."}
+        validation = [error for error in result["telemetry"].get("validation_errors", []) if error in safe_errors]
+        if validation:
+            st.caption("Response validation: " + validation[-1] + ".")
         if result["answer"]["listings"]:
             with st.expander("Basic catalog search results"):
                 st.caption("These satisfy your requirements. AI selection and explanations are unavailable.")

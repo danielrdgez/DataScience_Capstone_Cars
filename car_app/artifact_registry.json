@@ -46,8 +46,8 @@
   },
   "category_hierarchy_run": "vehicle_similarity_v5/20261026-epa-hierarchy-supported-validated",
   "category_hierarchy_manifest_sha256": "79c763c581736135ff36cb23e7068b08312d3f6e1728991d85f79e6f32b62137",
-  "discovery_run": "vehicle_similarity_v6/20261104T204904-listing-first/bundle",
-  "discovery_manifest_sha256": "0092d2d9df6cc7bfe55cea98c37e44f42e00322e48f7de21220e788212aff99e",
-  "discovery_validation": "E:\\DataScience_Capstone_Cars\\MODEL_OUTPUT\\vehicle_similarity_v6\\20261104T204904-listing-first\\validation",
+  "discovery_run": "vehicle_similarity_v7/20261114T204920/bundle",
+  "discovery_manifest_sha256": "f845ef18cd6c5b6e0511b0225fcbaa286dcea0cd3801b224f22f7d93425f0f66",
+  "discovery_validation": "E:\\DataScience_Capstone_Cars\\MODEL_OUTPUT\\vehicle_similarity_v7\\20261114T204920\\validation",
   "recommendation_policy_version": 5
 }

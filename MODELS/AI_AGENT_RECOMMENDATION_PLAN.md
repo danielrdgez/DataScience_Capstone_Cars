@@ -1,6 +1,6 @@
 # AI vehicle recommendation: implementation and evidence contract
 
-Status: November 10, 2026. Recommendation pricing currently selects the best completed tree and linear checkpoints by validation MAE. Full CatBoost OOF remains an optional offline workflow. Implemented behavior does not establish buyer suitability.
+Status: November 15, 2026. Recommendation pricing currently selects the best completed tree and linear checkpoints by validation MAE. Full CatBoost OOF remains an optional offline workflow. Implemented behavior does not establish buyer suitability.
 
 ## Architecture and sources
 
@@ -11,8 +11,8 @@ The [data dictionary](../DATA_DICTIONARY.md) defines source fields, transformati
 | Input | Grain and role | Interpretation |
 | --- | --- | --- |
 | Six selected Parquets and manifest | Listing facts, VIN decodes, NHTSA records, raw YouTube comments | Historical catalog; applicable observed facts satisfy hard requirements. |
-| Activated v6 bundle `20261104T204904-listing-first` | Listing-first body reconciliation; 10,827 model profiles and 21,226 trim profiles over 2,792,993 VINs | Shared dashboard/AI registry and validation receipt. Direct specification distance is default; unsupported clusters retain direct retrieval. |
-| NHTSA v6 text outputs | Dated family/component support, TF-IDF/SVD and MiniLM mixtures, narratives | Context-local unreviewed groups; allegations/campaigns, not risk estimates. |
+| Selected v7 bundle `20261114T204920` | Listing-first body reconciliation; 10,827 model profiles and 21,226 trim profiles over 2,792,993 VINs | Shared dashboard/AI registry and validation receipt. Groups are exploratory; direct specification distance remains the default for peers. |
+| NHTSA discovery text outputs | Dated family/component support, TF-IDF/SVD and MiniLM mixtures, narratives | Context-local unreviewed groups; allegations/campaigns, not risk estimates. |
 | Selected YouTube sentiment-v2 export | 83 makes; 75 exported measurements, 40 selected price inputs | Supported discussion/tone/uncertainty at make level; independent accuracy unmeasured. |
 | DougScore v2 | Model-year family or make fallback supported by five distinct models | Supplemental expert opinion; no trim match or verified historical availability. |
 | Selected tree and linear checkpoints | Completed saved predictors, validation selection, test predictions and split/source/replay receipts | Historical advertised-price estimates; not current valuations, transaction prices or preference labels. |
@@ -21,7 +21,7 @@ Read `DATA/CAR_DATA_FINAL/`. Join listings to vPIC on lowercase `vin`, never dec
 
 ## Discovery and text evidence
 
-- Load v6 through existing bundle, validation and source checks. Grouping retains grain, body partition and excluded query-family fold. Prices and NHTSA outcomes do not enter specification coordinates.
+- Load the selected discovery bundle through existing validation and source checks. Grouping retains grain, body partition and excluded query-family fold. Prices and NHTSA outcomes do not enter specification coordinates.
 - Reference comparisons use one saved reference fit for ranks and shared-cluster labels. Other subgroup descriptions retain their own contexts. IDs and axes never align across fits, periods or representations. Unknown semantic categories do not prevent specification retrieval.
 - Dashboard filters select reference VINs. Alternatives use independent requirements over the broader catalog, retaining same-body, plus/minus-ten-year and distinct Make/Model restrictions.
 - Historical NHTSA through `2020-12-31` is default. `latest_saved` is separate: currently built through `2026-11-04`, newest retained record `2026-09-23`. Collection completeness and historical version availability remain unverified.
@@ -35,7 +35,7 @@ Read `DATA/CAR_DATA_FINAL/`. Join listings to vPIC on lowercase `vin`, never dec
 
 `recommendation_price.kind = best_tree_linear_v1` selects one completed tree and one completed linear checkpoint from the dashboard's configured `price_run_selection`. Compatible Full continuations remain eligible per estimator. Select by validation MAE, never test error; the current winners are Full CatBoost and Full multiple linear regression. Both estimates reach the mandatory evidence tool and evidence table separately. No averaging or training occurs during recommendation.
 
-Saved unique test predictions must belong to the saved test VIN partition before they support historical model-relative ranking. The tree is the primary ranking model, with the linear model used if no tree checkpoint exists. Other requested VINs may receive supplemental inference using the existing verified feature assembly; these may be fitting VINs, so they cannot support held-out value ranking or evaluation. All estimates retain model, feature set, run, hashes, validation MAE and prediction type. Source/schema/package and frozen replay checks remain enforced. Missing evidence is disclosed without removing otherwise eligible observed-price browsing.
+Saved unique test predictions must belong to the saved test VIN partition before they support historical model-relative ranking. The tree is the primary ranking model, with the linear model used if no tree checkpoint exists. Other requested VINs may receive supplemental inference using the verified feature assembly; these may be fitting VINs, so they cannot support held-out value ranking or evaluation. The corrected source snapshot requires a hash-bound equivalence proof against original source files and a frozen-input/prediction replay for each estimator. Exact-checkpoint global TreeSHAP and linear coefficients accompany the AI context when their explanation receipts match the predictor and frozen inputs. These are global, noncausal explanations, not vehicle-specific weights. Estimates retain model, feature set, run, hashes, validation MAE and prediction type. Missing evidence is disclosed without removing otherwise eligible observed-price browsing.
 
 The explicit `MODELS.price_oof` training/validation/activation commands remain available. Activating an OOF bundle switches the recommendation policy back to that bundle. Existing source fields, feature definitions and cohort joins are unchanged.
 
@@ -62,7 +62,7 @@ Keep version-3 requirements and use the version-4 agent envelope/recommendation 
 - Pool distinct-family priority retrieval with supported specification, held-out price and safety lists; deduplicate VINs and cap at 24 listings. Performance uses advertised horsepower; passenger-space retrieval uses seating; lower-mileage and lower-price priorities use their named fields. Default retrieval uses mileage. These are limited proxies, not general suitability scores. Attach saved profiles and their own held-out subgroup contexts. Retrieve at most ten complete cohorts and aggregate all qualifying members.
 - Return one best match followed by up to five alternatives from distinct decoded Make/Model families. Every selection requires `reason`, `tradeoff`, `comparison` and candidate-specific `source_refs`. The winner explains why it leads; alternatives explain when to choose them instead. General recommendation requests leave personalized cohort output empty; cohort aggregates and deterministic lists remain supporting evidence. Ordering is preference-based and limited to the retrieved pool.
 - Recheck IDs, raw requirements, source signatures and selected model hashes before display. Changes invalidate candidate context. Invalid/provider-failed replies return available deterministic results; changed sources/models require fresh submission.
-- Limits: five model turns, ten tools, 128,000 application-context/tool-output characters, 4,000 characters per user message, 3,000 output tokens per call, 120-second submission deadline, twenty-second transport timeout, one transport retry. Checks surround local operations; blocking file reads may finish before cancellation is observed.
+- Limits: five model turns per provider run, ten tools across a submission, 128,000 application-context/tool-output characters, 4,000 characters per user message, 3,000 output tokens per call, 120-second submission deadline, twenty-second transport timeout, one transport retry. A final response rejected by an application-owned validation rule can receive one correction attempt within the same submission limits; unknown errors do not retry. Safe validation reasons appear in telemetry. Checks surround local operations; blocking file reads may finish before cancellation is observed.
 - Record requested model, available token usage, requests/tools, duration and safe failure category. Never expose keys, provider exception bodies or unvalidated model output.
 
 ## Streamlit workflow

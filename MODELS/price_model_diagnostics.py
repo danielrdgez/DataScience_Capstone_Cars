@@ -294,12 +294,15 @@ def explain_checkpoint(run, metadata, name, cache_root, *, rows=100, background_
             predicted = estimator.predict(x, thread_count=2)
         elif name == "xgboost":
             import xgboost as xgb
-            estimator.get_booster().set_param({"nthread": 2})
+            estimator.get_booster().set_param({"nthread": 2, "device": "cpu"})
             raw = estimator.get_booster().predict(xgb.DMatrix(x, enable_categorical=True), pred_contribs=True)
             values, base, predicted = raw[:, :-1], raw[:, -1], estimator.predict(x)
         else:
-            raw = estimator.predict(x, pred_contrib=True, num_threads=2)
-            values, base, predicted = raw[:, :-1], raw[:, -1], estimator.predict(x, num_threads=2)
+            from MODELS.Price_ML_Models import ShardedLightGBMRegressor
+            # The shard wrapper supplies its own bounded thread count.
+            threads = {} if isinstance(estimator, ShardedLightGBMRegressor) else {"num_threads": 2}
+            raw = estimator.predict(x, pred_contrib=True, **threads)
+            values, base, predicted = raw[:, :-1], raw[:, -1], estimator.predict(x, **threads)
         values = np.asarray(values)
         if values.shape != (len(x), len(features)):
             raise ValueError("SHAP shape does not match model inputs")

@@ -11,7 +11,7 @@ import pandas as pd
 import polars as pl
 import streamlit as st
 
-from car_app.data import ROOT, COHORT, Filters, snapshot, EXCLUDED_LISTING_VINS
+from car_app.data import ROOT, COHORT, Filters, filter_expression, snapshot, EXCLUDED_LISTING_VINS
 
 DEFAULT_BASE = "base/20261009T171630407257Z-full"
 DEFAULT_ENRICHED = "enhanced/20261011T050517300002Z-full"
@@ -105,13 +105,24 @@ def selected_vins(source_identity: str, filters: Filters):
 def evaluation(file: str, signature: tuple, source_identity: str, filters: Filters):
     predictions = pl.scan_parquet(file).filter(~pl.col("vin").is_in(sorted(EXCLUDED_LISTING_VINS)))
     if filters.active():
-        # Use the frozen receipt for cohort identity/actual price; current source
-        # attributes may supplement filters only after snapshot hashes agree.
-        run_path = Path(file).parent
-        meta = json.loads((run_path / "run_metadata.json").read_text())
-        validate_sources(meta)
-        selected = selected_vins(source_identity, filters)
-        predictions = predictions.join(selected.lazy(), on="vin", how="semi")
+        # Filter historical attributes directly, including the original target.
+        # Only filters absent from the receipt need the current source snapshot.
+        columns = {"makes": "Make", "models": "Model", "years": "ModelYear",
+                   "trims": "Trim", "body_types": "body_type", "fuels": "fuel_type",
+                   "drivetrains": "wheel_system", "condition": "is_new",
+                   "min_price": "actual_price", "max_price": "actual_price", "max_mileage": "mileage"}
+        schema = predictions.collect_schema()
+        saved = {key: value for key, value in filters.active().items() if columns[key] in schema}
+        current = {key: value for key, value in filters.active().items() if columns[key] not in schema}
+        if saved:
+            predictions = predictions.with_columns(pl.col("actual_price").alias("price")).filter(
+                filter_expression(Filters(**saved))).drop("price")
+        if current:
+            run_path = Path(file).parent
+            meta = json.loads((run_path / "run_metadata.json").read_text())
+            validate_sources(meta)
+            selected = selected_vins(source_identity, Filters(**current))
+            predictions = predictions.join(selected.lazy(), on="vin", how="semi")
     frame = predictions.collect().to_pandas()
     if frame.vin.duplicated().any():
         raise ValueError("Duplicate evaluation VINs")
@@ -231,6 +242,25 @@ def saved_shap(run, model):
     result = pd.read_csv(files[0]) if files else pd.DataFrame()
     result.attrs.update(method="Saved SHAP importance", scale=run.metadata.get("shap_output_scale", "unrecorded"))
     return result
+
+
+def refresh_diagnostic_explanations(rows=100):
+    """Build missing exact-checkpoint caches offline from frozen inputs, without fitting."""
+    from MODELS.price_model_diagnostics import explain_checkpoint
+
+    if rows < 1:
+        raise ValueError("Explanation rows must be positive")
+    available, choices, _, _ = diagnostic_inventory()
+    results = []
+    for choice in choices.itertuples():
+        run = available[choice.run]
+        if saved_shap(run, choice.model).empty:
+            print(f"Explaining {choice.feature_set} / {choice.model}", flush=True)
+            explain_checkpoint(run.path, run.metadata, choice.model,
+                               ROOT / "MODEL_OUTPUT/diagnostics/model_evaluations/explanations", rows=rows)
+        results.append({"feature_set": choice.feature_set, "model": choice.model,
+                        "features": len(saved_shap(run, choice.model))})
+    return pd.DataFrame(results)
 
 
 def continuation_run(base, reference, policy, model=None):

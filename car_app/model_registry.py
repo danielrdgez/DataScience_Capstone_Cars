@@ -29,7 +29,8 @@ COMMON_SOURCES = ("used_cars.parquet", "NHTSA_vPIC.parquet", "NHTSA_Complaints.p
                   "NHTSA_Recalls.parquet", "NHTSA_Safety.parquet")
 COMPARISON_KEYS = ("split_fingerprint", "split_strategy", "preprocessing_version", "code_fingerprint",
                    "package_versions", "tuning_rows", "max_trees", "price_weighting")
-INFERENCE_VERIFICATION_VERSION = 1
+INFERENCE_VERIFICATION_VERSION = 2
+SOURCE_EQUIVALENCE_VERSION = 1
 
 
 def read_json(path):
@@ -46,8 +47,75 @@ def inference_code_fingerprint():
     return hashlib.sha256(json.dumps(code, sort_keys=True).encode()).hexdigest()
 
 
+def verify_retained_source_equivalence(path, metadata):
+    """Prove all current listings and their original vPIC values are unchanged."""
+    old_listing = ROOT / "outputs/slide13_update/original_snapshot/used_cars.parquet"
+    backup_root = ROOT / "DATA/CAR_DATA_FINAL"
+    candidates = sorted(backup_root.glob(".vpic-alignment-backup-*/NHTSA_vPIC.parquet"))
+    old_vpic = next((item for item in candidates if digest(item) == metadata["source_file_sha256"]["NHTSA_vPIC.parquet"]), None)
+    current_listing = backup_root / "used_cars.parquet"
+    current_vpic = backup_root / "NHTSA_vPIC.parquet"
+    if not old_listing.is_file() or digest(old_listing) != metadata["source_file_sha256"]["used_cars.parquet"] or old_vpic is None:
+        raise ValueError("Original training source snapshots are unavailable")
+    split_path = Path(path) / "split_manifest.parquet"
+    signature = {"version": SOURCE_EQUIVALENCE_VERSION, "code": digest(Path(__file__)),
+        "old_listing": digest(old_listing), "old_vpic": digest(old_vpic),
+        "current_listing": digest(current_listing), "current_vpic": digest(current_vpic), "split": digest(split_path)}
+    key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
+    receipt_path = ROOT / "MODEL_OUTPUT/diagnostics/source_compatibility" / (key + ".json")
+    if receipt_path.is_file():
+        receipt = read_json(receipt_path)
+        if receipt.get("signature") == signature and receipt.get("status") == "passed":
+            return receipt
+
+    def compare_retained(old_path, new_path, allow_null_additions):
+        old, new = pl.scan_parquet(old_path), pl.scan_parquet(new_path)
+        if old.collect_schema() != new.collect_schema():
+            raise ValueError("Source schema changed")
+        old_keys, new_keys = old.select("vin").collect(), new.select("vin").collect()
+        for keys in (old_keys, new_keys):
+            if keys["vin"].null_count() or keys["vin"].n_unique() != keys.height:
+                raise ValueError("Source VINs must be unique and non-null")
+        added = new_keys.join(old_keys, on="vin", how="anti")
+        removed = old_keys.join(new_keys, on="vin", how="anti")
+        if not allow_null_additions and added.height:
+            raise ValueError("Current listing population includes new VINs")
+        columns = [name for name in old.collect_schema().names() if name != "vin"]
+        for start in range(0, len(columns), 10):
+            fields = columns[start:start + 10]
+            if added.height and allow_null_additions:
+                nonnull = new.join(added.lazy(), on="vin", how="semi").select(
+                    pl.any_horizontal([pl.col(field).is_not_null() for field in fields]).any()).collect().item()
+                if nonnull:
+                    raise ValueError("New vPIC rows contain source values")
+            pairs = old.select("vin", *fields).join(new.select("vin", *fields), on="vin", how="inner", suffix="_current", validate="1:1")
+            changed = pairs.select(pl.any_horizontal([~pl.col(field).eq_missing(pl.col(field + "_current")) for field in fields]).any()).collect().item()
+            if changed:
+                raise ValueError("Retained source values changed")
+        return removed, added.height
+
+    removed_listings, _ = compare_retained(old_listing, current_listing, False)
+    _, placeholders = compare_retained(old_vpic, current_vpic, True)
+    split = pl.scan_parquet(split_path).select("vin").collect()
+    if split["vin"].null_count() or split["vin"].n_unique() != split.height:
+        raise ValueError("Saved split VINs are not unique")
+    if removed_listings.join(split, on="vin", how="inner").height:
+        raise ValueError("Removed listings appear in the model population")
+    if any(digest(file) != signature[name] for name, file in (("old_listing", old_listing), ("old_vpic", old_vpic),
+            ("current_listing", current_listing), ("current_vpic", current_vpic), ("split", split_path))):
+        raise ValueError("Sources changed during equivalence verification")
+    receipt = {"status": "passed", "signature": signature, "removed_listings": removed_listings.height,
+               "missing_vpic_placeholders": placeholders, "model_population": split.height}
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = receipt_path.with_suffix("." + uuid4().hex + ".tmp")
+    temporary.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    temporary.replace(receipt_path)
+    return receipt
+
+
 @st.cache_data(max_entries=8, show_spinner=False)
-def prediction_inputs(vins, variant, expert_directory, youtube_directory, source_signature, code_fingerprint):
+def prediction_inputs(vins, variant, expert_directory, youtube_directory, source_signature, code_fingerprint,
+                      expert_vpic_sha256=None):
     """Prepare actual VIN rows once for estimators sharing a source/feature contract."""
     from MODELS.Price_ML_Models import prepare_prediction_frame
     requested = pl.DataFrame({"vin": list(vins)})
@@ -55,13 +123,14 @@ def prediction_inputs(vins, variant, expert_directory, youtube_directory, source
     raw = requested.join(raw, on="vin", how="left", validate="1:1", maintain_order="left")
     frame = prepare_prediction_frame(variant, raw,
         expert_feature_dir=Path(expert_directory) if expert_directory else None,
-        youtube_feature_dir=Path(youtube_directory) if youtube_directory else None)
+        youtube_feature_dir=Path(youtube_directory) if youtube_directory else None,
+        expert_vpic_sha256=expert_vpic_sha256)
     if frame.height != len(vins) or frame["vin"].to_list() != list(vins):
         raise ValueError("Prediction rows lost their listing identity/order")
     return frame
 
 
-def verify_inference_replay(path, metadata, model, code_fingerprint):
+def verify_inference_replay(path, metadata, model, code_fingerprint, expert_vpic_sha256=None):
     """Accept changed source files only after reproducing frozen inputs and USD predictions."""
     import joblib
     path = Path(path)
@@ -75,9 +144,11 @@ def verify_inference_replay(path, metadata, model, code_fingerprint):
     prediction_path = path / f"{model}_test_predictions.parquet"
     contract = {key: metadata.get(key) for key in ("model_type", "raw_feature_columns", "feature_columns",
         "preprocessing_version", "source_file_sha256", "package_versions", "shap_input_sha256", "split_fingerprint")}
+    current_sources = {name: digest(source) for name, source in price_sources(metadata).items()}
     signature = {"version": INFERENCE_VERIFICATION_VERSION, "run": str(path.resolve()), "model": model,
         "current_code_fingerprint": code_fingerprint, "training_code_fingerprint": metadata.get("code_fingerprint"),
-        "contract": contract, "predictor_sha256": digest(predictor_path), "test_predictions_sha256": digest(prediction_path)}
+        "contract": contract, "current_sources": current_sources, "expert_vpic_sha256": expert_vpic_sha256,
+        "predictor_sha256": digest(predictor_path), "test_predictions_sha256": digest(prediction_path)}
     key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
     receipt_path = ROOT / "MODEL_OUTPUT/diagnostics/inference_compatibility" / (key + ".json")
     if receipt_path.is_file():
@@ -91,7 +162,7 @@ def verify_inference_replay(path, metadata, model, code_fingerprint):
     sources = tuple((name, str(source), stat_key(source)) for name, source in price_sources(metadata).items())
     frame = prediction_inputs(tuple(reference.vin), metadata["model_type"],
         metadata.get("expert_features", {}).get("directory", ""),
-        metadata.get("youtube_features", {}).get("directory", ""), sources, code_fingerprint)
+        metadata.get("youtube_features", {}).get("directory", ""), sources, code_fingerprint, expert_vpic_sha256)
     predictor = joblib.load(predictor_path)
     raw = frame.select(metadata["raw_feature_columns"]).to_pandas()
     prepared = predictor.named_steps["input"].transform(raw)
@@ -108,7 +179,8 @@ def verify_inference_replay(path, metadata, model, code_fingerprint):
         np.testing.assert_allclose(predicted, expected, rtol=1e-7, atol=.01)
     except AssertionError as exc:
         raise ValueError("Current inference does not reproduce the frozen training inputs/predictions") from exc
-    if inference_code_fingerprint() != code_fingerprint or digest(predictor_path) != signature["predictor_sha256"]:
+    if (inference_code_fingerprint() != code_fingerprint or digest(predictor_path) != signature["predictor_sha256"]
+            or {name: digest(source) for name, source in price_sources(metadata).items()} != current_sources):
         raise ValueError("Inference inputs changed during verification")
     receipt = {"status": "passed", "signature": signature, "rows": len(reference),
                "maximum_absolute_usd_difference": float(np.max(np.abs(predicted - expected))),
@@ -209,15 +281,21 @@ def validate_price_run(path, model=None):
         if importlib.metadata.version(package) != version:
             raise ValueError(f"Package differs: {package}")
     sources = metadata["source_file_sha256"]
-    for name, source in price_sources(metadata).items():
-        if digest(source) != sources[name]:
-            raise ValueError(f"Source changed: {name}")
+    changed = [name for name, source in price_sources(metadata).items() if digest(source) != sources[name]]
+    if changed and (model is None or set(changed) - {"used_cars.parquet", "NHTSA_vPIC.parquet"}):
+        raise ValueError(f"Source changed: {changed[0]}")
     if hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest() != metadata.get("dataset_fingerprint"):
         raise ValueError("Dataset fingerprint differs")
-    if fingerprint != metadata.get("code_fingerprint"):
+    expert_vpic_sha256 = None
+    if changed:
+        verify_retained_source_equivalence(path, metadata)
+        expert_vpic_sha256 = sources["NHTSA_vPIC.parquet"]
+    if fingerprint != metadata.get("code_fingerprint") or changed:
         if model is None or metadata.get("models", {}).get(model, {}).get("status") != "completed":
             raise ValueError("Changed inference code requires a completed estimator for frozen replay")
-        verify_inference_replay(path, metadata, model, fingerprint)
+        verify_inference_replay(path, metadata, model, fingerprint, expert_vpic_sha256)
+    if expert_vpic_sha256:
+        metadata = {**metadata, "compatible_expert_vpic_sha256": expert_vpic_sha256}
     return metadata
 
 
@@ -296,7 +374,8 @@ def price_estimates(listings: pl.DataFrame, config=None):
         predictor, metadata = load_predictor(active["run"], active["model"], active["metadata_sha256"], active["predictor_sha256"], source_signature, code_fingerprint)
         frame = prediction_inputs(tuple(listings["vin"].to_list()), metadata["model_type"],
             metadata.get("expert_features", {}).get("directory", ""),
-            metadata.get("youtube_features", {}).get("directory", ""), source_signature, code_fingerprint)
+            metadata.get("youtube_features", {}).get("directory", ""), source_signature, code_fingerprint,
+            metadata.get("compatible_expert_vpic_sha256"))
         values = np.asarray(predictor.predict(frame.select(MODEL_FEATURE_SETS[metadata["model_type"]]).to_pandas()))
         if len(values) != listings.height or not np.isfinite(values).all() or (values <= 0).any():
             raise ValueError("Invalid USD predictions")
@@ -431,6 +510,8 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--output", type=Path, help="Fresh comparison report directory")
     mode.add_argument("--report", type=Path, help="Existing verified report for explicit activation")
+    mode.add_argument("--refresh-diagnostic-explanations", action="store_true",
+                      help="Cache missing explanations for dashboard-selected checkpoints without retraining")
     mode.add_argument("--activate-recommendation", type=Path,
                       help="Activate a validated Full CatBoost OOF bundle for the AI only")
     parser.add_argument("--activate", help="Explicit variant/run/estimator to activate after checks")
@@ -438,6 +519,10 @@ def main():
                         help="Explain each comparison-group validation winner on this many saved rows in report copies")
     parser.add_argument("--publish", action="store_true", help="Show this report in the app without changing its price model")
     args = parser.parse_args()
+    if args.refresh_diagnostic_explanations:
+        from car_app.artifacts import refresh_diagnostic_explanations
+        print(refresh_diagnostic_explanations(rows=args.explain_rows or 100).to_string(index=False))
+        return
     if args.activate_recommendation:
         from car_app.recommendation_price import activate as activate_recommendation
         print(json.dumps(activate_recommendation(args.activate_recommendation), indent=2))

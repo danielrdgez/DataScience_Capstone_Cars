@@ -1,4 +1,5 @@
 param(
+    [ValidateSet(6, 7)][int]$Version = 6,
     [string]$Python = '.\.venv-youtube\Scripts\python.exe',
     [string]$DataDir = 'DATA/CAR_DATA_FINAL',
     [string]$RunRoot = '',
@@ -16,7 +17,7 @@ $Python = (Resolve-Path -LiteralPath $Python).Path
 $DataDir = (Resolve-Path -LiteralPath $DataDir).Path
 if ([string]::IsNullOrWhiteSpace($RunRoot)) {
     if ($Resume) { throw 'Supply the original -RunRoot when resuming.' }
-    $RunRoot = Join-Path $WorkspaceRoot ('MODEL_OUTPUT/vehicle_similarity_v6/' + (Get-Date -Format 'yyyyMMddTHHmmss'))
+    $RunRoot = Join-Path $WorkspaceRoot ("MODEL_OUTPUT/vehicle_similarity_v$Version/" + (Get-Date -Format 'yyyyMMddTHHmmss'))
 }
 if (-not [IO.Path]::IsPathRooted($RunRoot)) { $RunRoot = Join-Path $WorkspaceRoot $RunRoot }
 $RunRoot = [IO.Path]::GetFullPath($RunRoot)
@@ -27,6 +28,9 @@ if ((Test-Path -LiteralPath $RunRoot) -and -not $Resume) {
 function Invoke-PythonStep {
     param([string]$Label, [string[]]$Arguments)
     Write-Host "`n$Label" -ForegroundColor Cyan
+    $Arguments = @($Arguments | ForEach-Object {
+        if ($_ -eq 'MODELS.vehicle_similarity_v6') { "MODELS.vehicle_similarity_v$Version" } else { $_ }
+    })
     & $Python @Arguments
     if ($LASTEXITCODE -ne 0) { throw "Stopped after '$Label' (exit $LASTEXITCODE). No later stage ran." }
 }
@@ -53,7 +57,7 @@ Invoke-PythonStep -Label '1. Read-only source preflight' -Arguments @('-m', 'MOD
 
 if (-not $SkipTests) {
     Invoke-PythonStep -Label '2. Syntax checks' -Arguments @('-m', 'compileall', '-q',
-        'MODELS/discovery_artifacts.py', 'MODELS/vehicle_similarity_v6.py', 'NHTSA/discovery_text.py', 'NHTSA/text_features.py',
+        'MODELS/discovery_artifacts.py', 'MODELS/vehicle_similarity_v6.py', 'MODELS/vehicle_similarity_v7.py', 'NHTSA/discovery_text.py', 'NHTSA/text_features.py',
         'car_app/discovery.py', 'car_app/recommendation.py', 'car_app/requirements.py', 'car_app/views.py',
         'app_pages/dashboard.py', 'app_pages/recommendation.py')
     Invoke-PythonStep -Label '3. Focused regression suites' -Arguments @('-m', 'unittest',

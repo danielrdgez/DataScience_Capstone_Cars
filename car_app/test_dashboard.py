@@ -507,19 +507,31 @@ category_explorer(c, "hierarchy", profiles=c.profiles.assign(matching_listings=c
         with self.assertRaisesRegex(ValueError, "Duplicate"):
             youtube_feature_tables(self.youtube_feature_fixture(), [*YOUTUBE_FEATURE_COLUMNS, YOUTUBE_FEATURE_COLUMNS[0]])
 
-    def test_youtube_panel_displays_selected_inputs_once_and_compares_makes(self):
+    def test_youtube_panel_charts_supported_evidence_and_preserves_comments(self):
         from MODELS.Price_ML_Models import YOUTUBE_FEATURE_COLUMNS
 
         data = self.youtube_feature_fixture()
         contract = {"directory": "fixture", "source_signature": (), "as_of": "2026-10-01",
                     "columns": list(YOUTUBE_FEATURE_COLUMNS), "runs": ["full/fixture-full"]}
         def query(identity, filters, operation, *args):
-            if operation != "youtube":
-                return pl.DataFrame()
+            if operation == "youtube_trace":
+                make = filters.makes[0]
+                return pl.DataFrame({"Make": [make, make], "comment_id": ["saved-1"] * 2,
+                    "video_title": ["Review"] * 2, "published_date": ["2026-09-01"] * 2,
+                    "text": [f"Example for {make}"] * 2,
+                    "evidence_start": [0, 15], "evidence_end": [14, 30],
+                    "evidence_text": ["Comfort is good", "Reliability is poor"],
+                    "topics": [["comfort"], ["reliability"]],
+                    "content_label": ["vehicle_opinion"] * 2, "overall_polarity": ["positive", "negative"],
+                    "feature_eligible": [True] * 2, "development_excluded": [False] * 2,
+                    "direct_price_mention": [False] * 2, "model_truncated": [False] * 2,
+                    "windowed": [False] * 2})
             return data.filter(pl.col("Make").is_in(list(filters.makes))) if filters.makes else data
         code = '''from types import SimpleNamespace
 from car_app.views import youtube
 from car_app.data import Filters
+import streamlit as st
+st.session_state["youtube_walkthrough"] = True
 youtube(SimpleNamespace(identity="fixture"), Filters(makes=("TOYOTA",)))
 '''
         with patch("car_app.views.query_snapshot", side_effect=query), \
@@ -527,19 +539,86 @@ youtube(SimpleNamespace(identity="fixture"), Filters(makes=("TOYOTA",)))
              patch("car_app.views.filter_options", return_value=(data.select("Make"), None)):
             app = AppTest.from_string(code, default_timeout=30).run()
             self.assertFalse(app.exception)
-            self.assertEqual(len(app.dataframe), 2)
-            self.assertEqual(len(app.dataframe[0].value), 40)
-            self.assertEqual(len(app.get("vega_lite_chart")), 1)
-            self.assertNotIn("yt_overall_video_balanced_soft_net", set(app.dataframe[0].value.Feature))
-            self.assertIn("yt_overall_video_balanced_soft_net", set(app.dataframe[1].value.Feature))
+            self.assertEqual(app.selectbox(key="youtube_base_make").value, "HONDA")
+            self.assertEqual([text.value for text in app.text], ["Example for HONDA", "Comfort is good", "Reliability is poor"])
+            self.assertEqual(len(app.get("vega_lite_chart")), 0)
+            app.selectbox(key="youtube_base_make").select("TOYOTA").run()
+            self.assertFalse(app.exception)
+            self.assertEqual(len(app.dataframe), 0)
+            self.assertEqual(len(app.get("vega_lite_chart")), 2)
+            self.assertEqual([heading.value for heading in app.subheader],
+                             ["Discussion topics", "Overall sentiment"])
+            self.assertEqual([item.label for item in app.expander], ["How the YouTube pipeline works"])
+            self.assertIn("Combined overall opinion: mixed.", [item.value for item in app.markdown])
+            self.assertEqual([text.value for text in app.text], ["Example for TOYOTA", "Comfort is good", "Reliability is poor"])
+            self.assertNotIn("Additional YouTube evidence", [item.label for item in app.expander])
             app.selectbox(key="youtube_compare_make").select("HONDA").run()
             self.assertFalse(app.exception)
-            self.assertEqual(len(app.dataframe[0].value), 80)
-            self.assertEqual(set(app.dataframe[0].value.Make), {"TOYOTA", "HONDA"})
-            self.assertEqual(len(app.get("vega_lite_chart")), 1)
-            app.selectbox(key="youtube_feature_group").select("Overall sentiment").run()
+            self.assertEqual(len(app.dataframe), 0)
+            self.assertEqual(len(app.get("vega_lite_chart")), 2)
+            self.assertEqual([text.value for text in app.text], ["Example for TOYOTA", "Comfort is good", "Reliability is poor"])
+            self.assertIn("Overall sentiment unavailable: HONDA", [item.value for item in app.caption])
+            data = data.filter(pl.col("Make") == "HONDA")
+            app.run()
             self.assertFalse(app.exception)
-            self.assertEqual(len(app.dataframe[0].value), 8)
+            self.assertEqual(len(app.get("vega_lite_chart")), 0)
+            self.assertIn("No supported overall sentiment scores are available for these makes.",
+                          [item.value for item in app.info])
+            self.assertEqual(app.selectbox(key="youtube_base_make").value, "HONDA")
+            self.assertIsNone(app.selectbox(key="youtube_compare_make").value)
+            self.assertEqual([text.value for text in app.text], ["Example for HONDA", "Comfort is good", "Reliability is poor"])
+            data = data.head(0)
+            app.run()
+            self.assertFalse(app.exception)
+            self.assertIn("No make has a saved feature row. This does not establish absence of discussion.",
+                          [item.value for item in app.info])
+
+    def test_snapshot_cache_refreshes_old_instances_after_code_change(self):
+        from types import SimpleNamespace
+        from car_app.data import snapshot_at
+
+        old_source = SimpleNamespace(identity="unchanged-data")
+        signature = (("fixture.parquet", 10, 20),)
+        snapshot_at.clear()
+        try:
+            with patch("car_app.data.Snapshot", return_value=old_source):
+                self.assertIs(snapshot_at(signature, "old-code"), old_source)
+            with patch("car_app.data.Snapshot", return_value=self.source) as constructor:
+                self.assertIs(snapshot_at(signature, "old-code"), old_source)
+                refreshed = snapshot_at(signature, "new-code")
+                self.assertIs(refreshed, self.source)
+                self.assertTrue(callable(refreshed.youtube_trace))
+                constructor.assert_called_once_with()
+        finally:
+            snapshot_at.clear()
+
+    def test_youtube_trace_retains_all_clauses_for_one_make_and_comment(self):
+        directory = Path(self.temp.name) / "trace/price"
+        shards = directory.parent / "scored/shards"
+        directory.mkdir(parents=True)
+        shards.mkdir(parents=True)
+        frame = pl.DataFrame({
+            "Make": ["TOYOTA", "TOYOTA", "HONDA", "TOYOTA"],
+            "comment_id": ["first", "first", "first", "other"],
+            "video_id": ["v1"] * 4, "video_title": ["Review"] * 4,
+            "text": ["Original"] * 4, "published_date": ["2026-09-01"] * 4,
+            "updated_date": ["2026-09-01"] * 4,
+            "attribution_scope": ["explicit_comment"] * 4,
+            "evidence_start": [10, 0, 0, 0], "evidence_end": [19, 9, 9, 9],
+            "evidence_text": ["Second", "First", "Wrong make", "Wrong comment"],
+            "topics": [["comfort"]] * 4, "content_label": ["vehicle_opinion"] * 4,
+            "overall_polarity": ["positive", "unresolved", "negative", "negative"],
+            "feature_eligible": [True, False, True, True],
+            "development_excluded": [False] * 4, "direct_price_mention": [False] * 4,
+            "model_truncated": [False] * 4, "windowed": [False] * 4,
+        })
+        frame.write_parquet(shards / "scores_000000.parquet")
+        source = object.__new__(Snapshot)
+        with patch.object(Snapshot, "catalog", return_value=pl.DataFrame({"Make": ["TOYOTA"]}).lazy()):
+            result = source.youtube_trace(Filters(makes=("TOYOTA",)), directory, "2026-10-01")
+        self.assertEqual(result["evidence_text"].to_list(), ["First", "Second"])
+        self.assertEqual(result["feature_eligible"].to_list(), [False, True])
+        self.assertEqual(result["Make"].unique().to_list(), ["TOYOTA"])
 
     def test_youtube_contract_uses_recorded_source_and_rejects_source_changes(self):
         import hashlib
@@ -617,6 +696,32 @@ youtube(SimpleNamespace(identity="fixture"), Filters(makes=("TOYOTA",)))
             with self.assertRaisesRegex(ValueError, "Source fingerprint changed"):
                 validate_sources({"source_file_sha256": {"used_cars.parquet": "wrong"},
                                   "dataset_fingerprint": "wrong"})
+
+    def test_evaluation_filters_frozen_attributes_without_current_source(self):
+        from car_app.artifacts import evaluation, stat_key
+
+        file = self.source.directory / "frozen_predictions.parquet"
+        pl.DataFrame({"vin": ["a", "b", "c"], "Make": ["TOYOTA"] * 3,
+                      "Model": ["Corolla"] * 3, "ModelYear": [2020.] * 3,
+                      "Trim": ["LE", "LE", "SE"], "is_new": ["False"] * 3,
+                      "mileage": [20000., 50000., 80000.],
+                      "actual_price": [9000., 19000., 29000.],
+                      "prediction": [10000., 18000., 30000.]}).write_parquet(file)
+        filters = Filters(makes=("TOYOTA",), models=("Corolla",), years=(2020,),
+                          trims=("LE",), condition="Used", min_price=9000., max_price=19000.,
+                          max_mileage=50000.)
+        with patch("car_app.artifacts.validate_sources") as validate, \
+             patch("car_app.artifacts.selected_vins") as current:
+            result = evaluation(str(file), stat_key(file), "changed-source", filters)
+        self.assertEqual(result.vin.tolist(), ["a", "b"])
+        self.assertEqual(result.actual_price.tolist(), [9000., 19000.])
+        self.assertNotIn("price", result)
+        validate.assert_not_called()
+        current.assert_not_called()
+        (file.parent / "run_metadata.json").write_text("{}")
+        with patch("car_app.artifacts.validate_sources", side_effect=ValueError("Source fingerprint changed")):
+            with self.assertRaisesRegex(ValueError, "Source fingerprint changed"):
+                evaluation(str(file), stat_key(file), "changed-source", Filters(body_types=("Sedan",)))
 
     def test_filtered_evaluation_checks_external_sources(self):
         import hashlib
@@ -962,6 +1067,36 @@ youtube(SimpleNamespace(identity="fixture"), Filters(makes=("TOYOTA",)))
         self.assertTrue(selected["unavailable"])
         inventory.assert_not_called()
 
+    def test_source_equivalence_checks_all_retained_values_and_model_population(self):
+        from car_app.model_registry import digest, verify_retained_source_equivalence
+
+        root = Path(self.temp.name) / "equivalent_sources"
+        originals = root / "outputs/slide13_update/original_snapshot"
+        current = root / "DATA/CAR_DATA_FINAL"
+        backup = current / ".vpic-alignment-backup-test"
+        run = root / "MODEL_OUTPUT/full/example-full"
+        for directory in (originals, backup, run):
+            directory.mkdir(parents=True)
+        old_listings = pl.DataFrame({"vin": ["a", "b", "removed"], "price": [1, 2, 3]})
+        old_listings.write_parquet(originals / "used_cars.parquet")
+        old_listings.filter(pl.col("vin") != "removed").write_parquet(current / "used_cars.parquet")
+        old_vpic = pl.DataFrame({"vin": ["a", "removed"], "Make": ["A", "B"]})
+        old_vpic.write_parquet(backup / "NHTSA_vPIC.parquet")
+        pl.DataFrame({"vin": ["a", "b"], "Make": ["A", None]}).write_parquet(current / "NHTSA_vPIC.parquet")
+        pl.DataFrame({"vin": ["a", "b"]}).write_parquet(run / "split_manifest.parquet")
+        metadata = {"source_file_sha256": {"used_cars.parquet": digest(originals / "used_cars.parquet"),
+                                             "NHTSA_vPIC.parquet": digest(backup / "NHTSA_vPIC.parquet")}}
+        with patch("car_app.model_registry.ROOT", root):
+            receipt = verify_retained_source_equivalence(run, metadata)
+            self.assertEqual((receipt["removed_listings"], receipt["missing_vpic_placeholders"]), (1, 1))
+            pl.DataFrame({"vin": ["a", "b"], "Make": ["CHANGED", None]}).write_parquet(current / "NHTSA_vPIC.parquet")
+            with self.assertRaisesRegex(ValueError, "Retained source values changed"):
+                verify_retained_source_equivalence(run, metadata)
+            pl.DataFrame({"vin": ["a", "b"], "Make": ["A", None]}).write_parquet(current / "NHTSA_vPIC.parquet")
+            pl.DataFrame({"vin": ["a", "removed"]}).write_parquet(run / "split_manifest.parquet")
+            with self.assertRaisesRegex(ValueError, "Removed listings appear"):
+                verify_retained_source_equivalence(run, metadata)
+
     def test_changed_inference_code_requires_frozen_input_and_vin_aligned_prediction_replay(self):
         import hashlib
         from types import SimpleNamespace
@@ -1157,10 +1292,13 @@ youtube(SimpleNamespace(identity="fixture"), Filters(makes=("TOYOTA",)))
             self.assertEqual(app.dataframe[1].value.mae.tolist(), [11.])
 
     def test_generate_renders_results_and_keeps_independent_budget(self):
+        from car_app.agent import Settings
         from car_app.data import filter_options, query_snapshot
         filter_options.clear(); query_snapshot.clear()
         self.addCleanup(filter_options.clear); self.addCleanup(query_snapshot.clear)
         with patch("car_app.data.snapshot", return_value=self.source), \
+             patch("car_app.agent.settings", return_value=Settings("")), \
+             patch("car_app.model_registry.registry", return_value={}), \
              patch("car_app.recommendation.load_similarity", return_value=None), \
              patch("car_app.model_registry.price_estimates", side_effect=lambda rows, config: (rows, None)):
             app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
@@ -1301,6 +1439,35 @@ class DiscoveryRankingTests(unittest.TestCase):
 
 
 class DiscoveryVisualizationTests(unittest.TestCase):
+    def test_feature_scatter_preserves_observed_values_groups_and_distinct_axes(self):
+        code = '''
+import pandas as pd
+from car_app.discovery import feature_scatter
+profiles = pd.DataFrame({"profile_id": ["a", "b", "c", "d"],
+    "wheelbase": [100., 110., None, 120.], "horsepower": [200., 300., 400., float("inf")],
+    "length": [180., 190., 200., 210.], "subgroup": ["Group 1", "Group 2", "Partial", "Group 2"]})
+feature_scatter(profiles, ["wheelbase", "horsepower", "length"], ["b"], "features")
+'''
+        with patch("car_app.discovery.map_chart") as draw:
+            app = AppTest.from_string(code).run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.selectbox(key="features_x").value, "wheelbase")
+            self.assertEqual(app.selectbox(key="features_y").value, "horsepower")
+            points = draw.call_args.args[0]
+            self.assertEqual(points.entity_id.tolist(), ["a", "b"])
+            self.assertEqual(points.x.tolist(), [100., 110.])
+            self.assertEqual(points.y.tolist(), [200., 300.])
+            self.assertEqual(points.cluster_label.tolist(), ["Group 1", "Group 2"])
+            self.assertEqual(draw.call_args.args[2], ["b"])
+            self.assertEqual(draw.call_args.kwargs["axis_titles"], ("Wheelbase (in)", "Horsepower (hp)"))
+            self.assertIn("2 profiles lack", " ".join(c.value for c in app.caption))
+            app.selectbox(key="features_x").set_value("horsepower").run()
+            self.assertFalse(app.exception)
+            self.assertNotEqual(app.selectbox(key="features_y").value, "horsepower")
+            app.selectbox(key="features_y").set_value("length").run()
+            self.assertFalse(app.exception)
+            self.assertEqual(draw.call_args.args[0].entity_id.tolist(), ["a", "b", "c"])
+
     def test_cells_preserve_unknown_zero_raw_units_and_observation_counts(self):
         from car_app.discovery import measure_cells, specification_summary
 
@@ -1310,7 +1477,9 @@ class DiscoveryVisualizationTests(unittest.TestCase):
         original = profiles.copy(deep=True)
         _, summary = specification_summary(profiles, ["horsepower", "length"])
         self.assertEqual(len(summary), 3)
-        group = summary.loc[summary.index.str.startswith("Group")]
+        self.assertEqual(set(summary.index), {"Specification group A", "Ungrouped — sufficient data",
+                                             "Ungrouped — limited or conflicting data"})
+        group = summary.loc[summary.index.str.startswith("Specification group")]
         self.assertEqual(group.horsepower.iloc[0], 200.)
         self.assertEqual(group.length_observed.iloc[0], 1)
         cells = measure_cells(summary, ["horsepower", "length"], {}, bounds=([100., 160.], [150., 200.]))
@@ -1348,8 +1517,9 @@ class DiscoveryVisualizationTests(unittest.TestCase):
             profiles = pd.DataFrame({"profile_id": ["p", "r"], "family_id": ["f", "g"], "fold": [0, 1],
                 "ModelYear": [2020, 2020], "Make": ["TEST", "OTHER"], "Model": ["One", "Two"],
                 "Trim": [None, None], "category": "Sedan", "identity_complete": True, "family_block": ["TEST|ONE", "OTHER|TWO"]})
-            components = pd.DataFrame({"family_id": ["f"], "source": ["complaint"], "record_count": [2],
-                "usable_text_count": [2], "supported": [False], "brakes_share": [0.], "brakes_count": [0]})
+            components = pd.DataFrame({"family_id": ["f", "f"], "source": ["complaint", "recall"], "record_count": [2, 2],
+                "usable_text_count": [2, 2], "supported": [False, True], "brakes_share": [0., 0.], "brakes_count": [0, 0],
+                "powertrain_share": [.5, .5], "powertrain_count": [1, 1]})
             safety = profiles.iloc[:1].assign(vehicle_id="v", variant_description="2020 TEST One", rating_era="post_2011",
                 OverallSideCrashRating=5., RolloverRating=np.nan, SidePoleCrashRating=4.)
             catalog = SimpleNamespace(path=root / "bundle", text=text, profiles=profiles, safety=safety, grain="model",
@@ -1372,9 +1542,9 @@ class DiscoveryVisualizationTests(unittest.TestCase):
                     app.segmented_control(key=display_key).set_value("Compare vehicles").run()
                     self.assertFalse(app.exception)
                     self.assertGreater(len(app.get("vega_lite_chart")), 0)
-                    app.segmented_control(key=display_key).set_value("Advanced exploration").run()
-                    self.assertFalse(app.exception)
-                    self.assertTrue(app.info)
+                    self.assertNotIn("Advanced exploration", app.segmented_control(key=display_key).options)
+                    self.assertFalse(any(widget.label in ("Pattern", "Plot axes") for widget in app.segmented_control))
+
 
 
 class AgentTests(unittest.TestCase):
@@ -1475,6 +1645,52 @@ class AgentTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Context budget"):
                 self.review(c)
         self.assertFalse(c.context.reviewed_ids)
+
+    def test_rejected_final_response_gets_one_validated_correction(self):
+        from car_app.agent import AgentAnswer, RankedCandidate, run_turn
+
+        calls = []
+        async def provider(c, inputs, config):
+            calls.append(inputs)
+            if len(calls) == 1:
+                c.search()
+            else:
+                self.assertIn("Retrieve recommendation evidence", inputs[-1]["content"])
+                self.review(c)
+            answer = AgentAnswer(message="Historical result", questions=[], cohorts=[], listings=[
+                RankedCandidate(candidate_id="listing:a", reason="Fits the budget", tradeoff="Condition is unverified",
+                                comparison="Meets the stated requirements", source_refs=["listing:a:facts"])])
+            result = self.provider_result(answer)
+            result.to_input_list = lambda: [{"role": "user", "content": "Prior context"}]
+            return result
+
+        result = run_turn(self.source, self.requirements, 1, self.categories, "Recommend", [], {}, provider=provider)
+        self.assertIsNone(result["telemetry"]["failure_category"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["telemetry"]["requests"], 2)
+        self.assertEqual(result["evidence_reviewed_ids"], ["listing:a"])
+        self.assertIn("Retrieve recommendation evidence for every final listing before answering",
+                      result["telemetry"]["validation_errors"])
+
+    def test_response_correction_stops_after_second_invalid_response(self):
+        from car_app.agent import AgentAnswer, RankedCandidate, run_turn
+
+        calls = []
+        async def provider(c, inputs, config):
+            calls.append(1)
+            if len(calls) == 1:
+                c.search()
+            answer = AgentAnswer(message="Unreviewed", questions=[], cohorts=[], listings=[
+                RankedCandidate(candidate_id="listing:a", reason="Fits", tradeoff="Unknown", comparison="Leads",
+                                source_refs=["listing:a:facts"])])
+            result = self.provider_result(answer)
+            result.to_input_list = lambda: [{"role": "user", "content": "Prior context"}]
+            return result
+
+        result = run_turn(self.source, self.requirements, 1, self.categories, "Recommend", [], {}, provider=provider)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["telemetry"]["failure_category"], "invalid_response")
+        self.assertNotIn("Unreviewed", json.dumps(result))
 
     def test_structured_safety_is_retrieved_without_text_bundle_and_unrated_stays_unknown(self):
         from car_app.agent_context import evidence_for
@@ -1839,11 +2055,27 @@ class TreeLinearPricePolicyTests(unittest.TestCase):
             {"feature_set": "full", "model": "ridge", "run": "full/c-full", "validation_mae": 30., "test_mae": 1.},
             {"feature_set": "full", "model": "multiple_linear_regression", "run": "full/d-full", "validation_mae": 25., "test_mae": 80.}])
         with patch("car_app.artifacts.diagnostic_inventory", return_value=({}, candidates, None, None)), \
-             patch("car_app.model_registry.digest", return_value="hash"):
+             patch("car_app.model_registry.digest", return_value="hash"), \
+             patch("car_app.recommendation_price.check_checkpoint"):
             models = select_model({"recommendation_price": {"kind": "best_tree_linear_v1"}})
         self.assertEqual(models["tree"]["model"], "catboost")
         self.assertEqual(models["linear"]["model"], "multiple_linear_regression")
         self.assertEqual(models["primary"], models["tree"])
+
+    def test_incompatible_checkpoints_are_unavailable_without_blocking_recommendations(self):
+        from car_app.recommendation_price import select_model
+        candidates = pd.DataFrame([
+            {"feature_set": "full", "model": "catboost", "run": "full/a-full", "validation_mae": 10.},
+            {"feature_set": "full", "model": "ridge", "run": "full/b-full", "validation_mae": 20.}])
+        with patch("car_app.artifacts.diagnostic_inventory", return_value=({}, candidates, None, None)), \
+             patch("car_app.model_registry.digest", return_value="hash"), \
+             patch("car_app.recommendation_price.check_checkpoint", side_effect=ValueError("Source changed: used_cars.parquet")):
+            models = select_model({"recommendation_price": {"kind": "best_tree_linear_v1"}})
+        self.assertIsNone(models["tree"])
+        self.assertIsNone(models["linear"])
+        self.assertIsNone(models["primary"])
+        self.assertEqual(len(models["unavailable"]), 2)
+        self.assertTrue(all("Source changed" in warning for warning in models["unavailable"]))
 
     def test_checkpoint_bank_rejects_a_fitting_vin(self):
         from car_app.recommendation_price import checkpoint_prices

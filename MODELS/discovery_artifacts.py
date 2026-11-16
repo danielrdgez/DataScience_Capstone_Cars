@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
+import time
 from importlib.metadata import version
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +25,6 @@ def read_json(path):
 
 def write_json(path, value):
     path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
     def clean(item):
         if isinstance(item, dict):
             return {str(k): clean(v) for k, v in item.items()}
@@ -34,8 +35,24 @@ def write_json(path, value):
         if isinstance(item, np.integer):
             return int(item)
         return item
-    temporary.write_text(json.dumps(clean(value), indent=2, default=str, allow_nan=False) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    payload = json.dumps(clean(value), indent=2, default=str, allow_nan=False) + "\n"
+    # Use a closed, unique sibling file for atomic replacement on Windows.
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                     prefix=path.name + ".", suffix=".tmp", delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write(payload)
+    try:
+        for attempt in range(9):
+            try:
+                temporary.replace(path)
+                break
+            except PermissionError:
+                # Readers or scanners can briefly lock a recently written receipt.
+                if attempt == 8:
+                    raise
+                time.sleep(min(.05 * 2 ** attempt, 1.))
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def digest(value):
@@ -80,7 +97,7 @@ def normalize_families(frame):
 
 
 def producer_hashes():
-    paths = [Path(__file__), ROOT / "MODELS/vehicle_similarity_v6.py", ROOT / "NHTSA/discovery_text.py",
+    paths = [Path(__file__), ROOT / "MODELS/vehicle_similarity_v6.py", ROOT / "MODELS/vehicle_similarity_v7.py", ROOT / "NHTSA/discovery_text.py",
              ROOT / "NHTSA/text_features.py", ROOT / "MODELS/vehicle_similarity_v5.py",
              ROOT / "MODELS/vehicle_similarity_v3.py", ROOT / "MODELS/vehicle_profiles_v5.py",
              ROOT / "MODELS/vehicle_taxonomy_v2.py", ROOT / "MODELS/vehicle_taxonomy.py", ROOT / "EDA/DATA_CLEANING.py"]
@@ -94,6 +111,8 @@ def dependency(path):
 
 def start(path, stage, configuration, dependencies=(), resume=False):
     path = Path(path)
+    # Compare the same JSON representation that is persisted (tuples become lists).
+    configuration = json.loads(json.dumps(configuration))
     contract = {"schema_version": VERSION, "stage": stage, "configuration": configuration,
                 "dependencies": [dependency(p) for p in dependencies], "code_hashes": producer_hashes(),
                 "package_versions": {name: version(name) for name in ("numpy", "pandas", "polars", "scikit-learn", "scipy", "joblib")}}

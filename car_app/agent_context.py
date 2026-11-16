@@ -48,12 +48,27 @@ def dictionary_context(terms=()):
             "definitions": rows}
 
 
-def saved_price_explanations(config):
+def saved_price_explanations(config, models=None):
     """Never borrow an explanation from an unrelated historical checkpoint."""
-    models = selected_price_models(config)
-    return {family: {**models[family], "global_features": [],
-            "status": "No verified explanation loaded for this selected price checkpoint."}
-            for family in ("tree", "linear", "catboost") if models.get(family)}
+    from car_app.artifacts import Run, saved_shap
+    from car_app.model_registry import read_json
+
+    models = selected_price_models(config) if models is None else models
+    explanations = {}
+    for family in ("tree", "linear", "catboost"):
+        selection = models.get(family)
+        if not selection or selection.get("kind") != "saved_checkpoint_v1":
+            continue
+        path = ROOT / "MODEL_OUTPUT" / selection["run"]
+        importance = saved_shap(Run(path, read_json(path / "run_metadata.json")), selection["model"])
+        details = {**selection, "global_features": [],
+                   "status": "No verified explanation loaded for this selected price checkpoint."}
+        if not importance.empty:
+            details.update(global_features=clean(importance.head(10).to_dict("records")),
+                           method=importance.attrs.get("method"), scale=importance.attrs.get("scale"),
+                           sample_rows=importance.attrs.get("sample_rows"), status="available")
+        explanations[family] = details
+    return explanations
 
 
 def clean(value):
@@ -144,7 +159,7 @@ class RecommendationContext:
         self.artifacts["price_models"] = self.models
         self.warnings.extend(self.models["unavailable"])
         try:
-            self.model_explanations = saved_price_explanations(self.config)
+            self.model_explanations = saved_price_explanations(self.config, self.models)
         except (OSError, ValueError, KeyError) as exc:
             self.warnings.append("Saved price explanations unavailable: " + str(exc))
         self.artifacts["price_explanations"] = self.model_explanations
@@ -373,7 +388,14 @@ class RecommendationContext:
                     if representative.height != 1:
                         raise ValueError("The cohort no longer contains qualifying members")
                     lookup = representative.to_dicts()[0]
-                evidence, warnings = evidence_for(self.source, lookup, self.requirements, self.catalog)
+                expert_vpic_sha256 = None
+                selected = (self.models or {}).get("primary")
+                if selected and selected.get("kind") == "saved_checkpoint_v1":
+                    from car_app.model_registry import read_json
+                    metadata = read_json(ROOT / "MODEL_OUTPUT" / selected["run"] / "run_metadata.json")
+                    expert_vpic_sha256 = metadata.get("source_file_sha256", {}).get("NHTSA_vPIC.parquet")
+                evidence, warnings = evidence_for(self.source, lookup, self.requirements, self.catalog,
+                                                  expert_vpic_sha256=expert_vpic_sha256)
                 if cid in self.cohorts:
                     # One member resolves family/make evidence; its specification partition cannot describe every cohort member.
                     evidence.pop("specifications", None)
@@ -386,7 +408,7 @@ class RecommendationContext:
         return output
 
 
-def evidence_for(source, row, requirements, catalog):
+def evidence_for(source, row, requirements, catalog, *, expert_vpic_sha256=None):
     """Read named text measurements and records; opaque coordinates are not prose labels."""
     from car_app.artifacts import stat_key, youtube_price_contract
     from car_app.data import youtube_feature_source
@@ -419,7 +441,7 @@ def evidence_for(source, row, requirements, catalog):
     try:
         from EXPERT_REVIEWS.price_features import load_features, join_features
         from car_app.model_registry import digest
-        vpic_hash = catalog.receipt["source_hashes"]["NHTSA_vPIC.parquet"] if catalog else digest(source.directory / "NHTSA_vPIC.parquet")
+        vpic_hash = expert_vpic_sha256 or (catalog.receipt["source_hashes"]["NHTSA_vPIC.parquet"] if catalog else digest(source.directory / "NHTSA_vPIC.parquet"))
         cohorts, makes, receipt = load_features(vpic_sha256=vpic_hash)
         matched = join_features(pl.DataFrame([{c: row.get(c) for c in COHORT}]), cohorts, makes)
         evidence["expert"] = {"manifest": receipt["manifest_sha256"], "measurements": clean(matched.to_dicts()),

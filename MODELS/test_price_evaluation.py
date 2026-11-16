@@ -263,6 +263,20 @@ class PriceEvaluationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "offsets"):
                 price._validate_lightgbm_shard(state["texts"][0].replace("Tree=1\n", "Tree=999\n"))
             self.assertEqual(json.loads((path / "progress.json").read_text())["completed_iterations"], 203)
+            from sklearn.pipeline import Pipeline
+            from MODELS.price_model_diagnostics import explain_checkpoint
+
+            (path / "lightgbm").mkdir()
+            joblib.dump(Pipeline([("estimator", loaded)]), path / "lightgbm/predictor.joblib")
+            x.iloc[:4].to_parquet(path / "inputs.parquet")
+            pd.DataFrame({"vin": ["a", "b", "c", "d"]}).to_parquet(path / "receipt.parquet")
+            metadata = {"shap_inputs": "inputs.parquet", "shap_receipt": "receipt.parquet",
+                        "feature_columns": list(x.columns),
+                        "shap_input_sha256": {name: price.file_sha256(path / name)
+                                              for name in ("inputs.parquet", "receipt.parquet")}}
+            importance, status = explain_checkpoint(path, metadata, "lightgbm", path / "cache", rows=4)
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(set(importance.feature), set(x.columns))
 
     def test_boosting_unlimited_budget_expands_until_patience_completes(self):
         from unittest.mock import MagicMock

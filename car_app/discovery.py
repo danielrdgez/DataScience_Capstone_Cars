@@ -158,7 +158,8 @@ def active_catalog(source, grain="model"):
 
 
 def discovery_caption(catalog):
-    st.caption(f"Discovery v6 · validated full run {catalog.path.parent.name} · {catalog.grain} profiles · completed {catalog.receipt['completed_at'][:10]}")
+    version = catalog.receipt.get("grouping_version", 6)
+    st.caption(f"Discovery v{version} · validated full run {catalog.path.parent.name} · {catalog.grain} profiles · completed {catalog.receipt['completed_at'][:10]}")
 
 
 @st.cache_data(max_entries=4, show_spinner=False)
@@ -284,15 +285,19 @@ def choose_profiles(profiles, key, maximum=3, identity="profile_id"):
                           format_func=names.get, max_selections=maximum, key=key)
 
 
-def discovery_display(key, safety=False):
+def discovery_display(key, safety=False, advanced=True):
     previous = st.session_state.get(key)
     if previous in ("Map", "Compare"):
         st.session_state[key] = {"Map": "Overview", "Compare": "Compare vehicles"}[previous]
-    options = ["Overview", "Compare vehicles"] + ([] if safety else ["Similar vehicles"]) + ["Advanced exploration"]
+    options = ["Overview", "Compare vehicles"] + ([] if safety else ["Similar vehicles"]) + (["Advanced exploration"] if advanced else [])
+    if st.session_state.get(key) not in options and key in st.session_state:
+        st.session_state[key] = "Overview"
     return st.segmented_control("Display", options, default="Overview", key=key) or "Overview"
 
 
-def map_chart(points, arrows, selected, key, label="Vehicle locations"):
+def map_chart(points, arrows, selected, key, label="Vehicle locations", *,
+              axis_titles=("Coordinate 1", "Coordinate 2"),
+              caption="Filtering does not refit the projection.", zero=True):
     if points.empty or not {"x", "y", "entity_id"}.issubset(points):
         st.info("Not enough supported coordinates for a two-dimensional map.")
         return
@@ -304,10 +309,15 @@ def map_chart(points, arrows, selected, key, label="Vehicle locations"):
         points = pd.concat([pinned, rest], ignore_index=True)
     points["role"] = np.where(points.entity_id.isin(selected), "Selected", "Other")
     color = "cluster_label" if "cluster_label" in points else "role"
-    tooltip = [c for c in [*COHORT, "vehicle_id", "category", "cluster_label", "matching_listings", "entity_id", "usable_documents", "supported", "x", "y"] if c in points]
+    tooltip = [c for c in [*COHORT, "vehicle_id", "category", "cluster_label", "matching_listings", "entity_id", "usable_documents", "supported"] if c in points]
+    tooltip += [alt.Tooltip("x:Q", title=axis_titles[0]), alt.Tooltip("y:Q", title=axis_titles[1])]
+    if color == "cluster_label" and "description" in points:
+        tooltip.append(alt.Tooltip("description:N", title="Typical group profile"))
     chart = alt.Chart(points).mark_point(filled=True, size=65).encode(
-        x=alt.X("x:Q", title="Coordinate 1"), y=alt.Y("y:Q", title="Coordinate 2"),
-        color=alt.Color(color + ":N"), tooltip=tooltip,
+        x=alt.X("x:Q", title=axis_titles[0], scale=alt.Scale(zero=zero)),
+        y=alt.Y("y:Q", title=axis_titles[1], scale=alt.Scale(zero=zero)),
+        color=alt.Color(color + ":N", title="Vehicle specification groups" if color == "cluster_label" else "Selection",
+                        legend=alt.Legend(labelLimit=360)), tooltip=tooltip,
         shape=alt.Shape("role:N", scale=alt.Scale(domain=["Other", "Selected"], range=["circle", "diamond"])))
     if not arrows.empty:
         drawn = arrows.copy()
@@ -326,7 +336,43 @@ def map_chart(points, arrows, selected, key, label="Vehicle locations"):
         chart = chart + rules + heads + labels
         st.caption("Arrow lengths share one display scale; hover shows their original values. Directions describe features or themes, not safety or reliability.")
     st.altair_chart(chart.properties(height=420).interactive(), key=key, alt=label)
-    st.caption(f"{len(points):,} of {total:,} locations shown. Filtering does not refit the projection.")
+    st.caption(f"{len(points):,} of {total:,} locations shown. " + caption)
+
+
+def feature_scatter(profiles, fields, selected, key, *, identity="profile_id", labels=None,
+                    observation_caption="Each point is a saved vehicle profile; axes show profile medians in original units.",
+                    map_caption="Colors retain the saved groups for the current reference; changing axes does not refit them."):
+    labels = SPEC_LABELS if labels is None else labels
+    available = [field for field in fields if field in profiles]
+    if len(available) < 2:
+        st.info("At least two saved numeric features are needed for a feature scatter plot.")
+        return
+    x_key, y_key = key + "_x", key + "_y"
+    if st.session_state.get(x_key) not in available:
+        st.session_state[x_key] = "wheelbase" if "wheelbase" in available else available[0]
+    with st.container(horizontal=True):
+        x = st.selectbox("X-axis feature", available, format_func=lambda f: labels.get(f, f), key=x_key)
+        y_options = [field for field in available if field != x]
+        if st.session_state.get(y_key) not in y_options:
+            st.session_state[y_key] = "horsepower" if "horsepower" in y_options else y_options[0]
+        y = st.selectbox("Y-axis feature", y_options, format_func=lambda f: labels.get(f, f), key=y_key)
+    points = profiles.assign(
+        entity_id=profiles[identity],
+        x=pd.to_numeric(profiles[x], errors="coerce"), y=pd.to_numeric(profiles[y], errors="coerce"),
+    ).replace({"x": {np.inf: np.nan, -np.inf: np.nan}, "y": {np.inf: np.nan, -np.inf: np.nan}})
+    if "subgroup" in profiles:
+        points["cluster_label"] = profiles.subgroup
+    points = points.dropna(subset=["x", "y"])
+    omitted = len(profiles) - len(points)
+    st.caption(observation_caption + " " +
+               f"{omitted:,} profiles lack a finite value for one or both selected features and are omitted.")
+    if points.empty:
+        st.info("No profiles have observed values for both selected features. Choose another feature pair.")
+        return
+    titles = (labels.get(x, x), labels.get(y, y))
+    map_chart(points, pd.DataFrame(), selected, key + "_scatter",
+              f"Vehicle profiles by {titles[0]} and {titles[1]}", axis_titles=titles,
+              caption=map_caption, zero=False)
 
 
 def measure_cells(frame, fields, names, labels=None, bounds=None, percentages=False):
@@ -452,6 +498,8 @@ def text_neighbors(path, profiles, reference, limit=10):
 
 def projection_caption(path):
     metadata = a.read_json(path / "projection.json")
+    if metadata.get("note"):
+        st.caption(metadata["note"])
     ratio = metadata.get("explained_variance_ratio")
     if ratio:
         st.caption("Displayed variance: " + ", ".join(f"axis {i + 1} {v:.1%}" for i, v in enumerate(ratio)) + ". Two dimensions do not preserve every original distance.")
@@ -461,9 +509,9 @@ def projection_caption(path):
 def specification_summary(profiles, fields):
     profiles = profiles.copy()
     profiles["subgroup"] = profiles.apply(lambda row:
-        f"Group {int(row.cluster) + 1}: {row.description}" if pd.notna(row.cluster) and row.cluster >= 0
-        else ("Partial profiles" if row.status == "insufficient_observations" or pd.isna(row.status)
-              else "Direct peers (no accepted subgroup)"), axis=1)
+        f"Specification group {chr(65 + int(row.cluster))}" if pd.notna(row.cluster) and row.cluster >= 0
+        else ("Ungrouped — limited or conflicting data" if row.status == "insufficient_observations" or pd.isna(row.status)
+              else "Ungrouped — sufficient data"), axis=1)
     groups = profiles.groupby("subgroup", sort=True)
     summary = groups[fields].median()
     summary["profile_count"] = groups.size()
@@ -479,6 +527,7 @@ def category_dashboard(source, filters, key="v6_categories"):
     grain = st.segmented_control("Discovery population", ["model", "cohort"], default="model", key=key + "_grain",
                                  format_func=lambda x: "Model level" if x == "model" else "Trim cohorts")
     catalog = active_catalog(source, grain or "model")
+    exploratory = catalog.receipt.get("grouping_version", 6) == 7
     st.subheader("Vehicle categories")
     discovery_caption(catalog)
     profiles = catalog.scope(source, filters)
@@ -486,9 +535,14 @@ def category_dashboard(source, filters, key="v6_categories"):
         st.info("No vehicle profiles match the dashboard filters.")
         return True
     st.metric("Matching listings", f"{int(profiles.matching_listings.sum()):,}")
-    categories = sorted(profiles.category.unique())
+    categories = sorted(profiles.loc[profiles.category.ne("Body unresolved") | exploratory, "category"].unique())
+    if not categories:
+        st.info("No resolved body categories match the dashboard filters.")
+        return True
     common = profiles.loc[profiles.category.ne("Body unresolved")].groupby("category").matching_listings.sum()
     default_category = common.idxmax() if not common.empty else categories[0]
+    if key + "_body" in st.session_state and st.session_state[key + "_body"] not in categories:
+        st.session_state[key + "_body"] = default_category
     category = st.selectbox("Body category", categories, index=categories.index(default_category), key=key + "_body")
     profiles = profiles.loc[profiles.category.eq(category)]
     selected = choose_profiles(profiles, key + "_selected")
@@ -497,8 +551,14 @@ def category_dashboard(source, filters, key="v6_categories"):
     rows = catalog.assignments.loc[catalog.assignments.context.eq(context)]
     profiles = profiles.merge(rows[["profile_id", "eligible", "cluster", "description", "status"]], on="profile_id", how="left", validate="1:1")
     with st.container(horizontal=True):
-        st.metric("Supported profiles", int(profiles.eligible.fillna(False).sum()))
-        st.metric("Partial profiles", int((~profiles.eligible.fillna(False)).sum()))
+        if exploratory:
+            st.metric("Grouped profiles", int(profiles.cluster.ge(0).sum()))
+            st.metric("Matching profiles", len(profiles))
+        else:
+            st.metric("Supported profiles", int(profiles.eligible.fillna(False).sum()))
+            st.metric("Limited or conflicting data", int((~profiles.eligible.fillna(False)).sum()))
+    if exploratory:
+        st.caption("Exploratory v7: every profile receives a group. Missing specifications use development-fitted imputation for clustering; source values remain unknown in charts. Groups do not establish data sufficiency or stability.")
     path = catalog.specs / catalog.grain / "contexts" / context / "projection"
     model_path = path.parent / "retrieval.joblib"
     model = joblib.load(model_path) if model_path.exists() else {"fields": []}
@@ -508,8 +568,9 @@ def category_dashboard(source, filters, key="v6_categories"):
     profiles, summary = specification_summary(profiles, fields)
     mode = discovery_display(key + "_display")
     if mode == "Overview":
-        st.caption("Subgroup medians weight matching profiles equally; n counts profiles, not listings. Group IDs belong to the current saved reference fit and can change with the selected vehicle. Partial profiles and direct-peer fallbacks stay separate.")
-        names = {identity: f"{identity.split(':')[0].replace(' (no accepted subgroup)', '')} · n={int(row.profile_count):,}"
+        st.caption("Group medians weight matching profiles equally; n counts profiles, not listings. Group letters belong to the current saved reference fit and can change with the selected vehicle."
+                   + ("" if exploratory else " Ungrouped profiles remain separate by data support."))
+        names = {identity: f"{identity} · n={int(row.profile_count):,}"
                  for identity, row in summary.iterrows()}
         if not fields:
             st.info("No numeric specification fields met the saved support checks for this body category. Profile counts and source details remain available.")
@@ -532,15 +593,29 @@ def category_dashboard(source, filters, key="v6_categories"):
                          key + "_peers", "Specification distance (smaller is closer)")
             st.caption("Reference: " + profile_names(catalog.profiles)[selected[0]] + ". Other Make/Model families within current filters, the same body category and ±10 model years; one reference-held-out fit.")
     else:
-        if (path / "points.parquet").exists():
+        axes = st.segmented_control("Plot axes", ["Vehicle features", "PCA map"], default="Vehicle features", key=key + "_axes")
+        if axes != "PCA map":
+            feature_scatter(profiles, fields, selected, key + "_features")
+        elif (path / "points.parquet").exists():
             projection_caption(path)
             points = pd.read_parquet(path / "points.parquet").merge(profiles, left_on="entity_id", right_on="profile_id", validate="1:1")
             points["cluster_label"] = points.subgroup
             show_arrows = st.checkbox("Show feature directions", value=False, key=key + "_arrows")
             arrows = pd.read_parquet(path / "arrows.parquet") if show_arrows else pd.DataFrame()
-            map_chart(points, arrows, selected, key + "_map")
+            ratio = metadata.get("explained_variance_ratio", [])
+            titles = tuple(f"PC{i + 1}" + (f" ({ratio[i]:.1%} variance)" if i < len(ratio) else "") for i in range(2))
+            map_chart(points, arrows, selected, key + "_map", axis_titles=titles)
         else:
             st.info("This body category has insufficient supported specification data for a saved projection.")
+        if not exploratory:
+            st.caption(
+                "**Ungrouped — sufficient data:** eligible, but no stable grouping was accepted or the profile "
+                "exceeds its nearest group's saved 95th-percentile distance limit.\n\n"
+                "**Ungrouped — limited or conflicting data:** fails one or more eligibility rules.\n\n"
+                "**Requirements:** complete decoded identity (year/make/model; also trim for trim cohorts), at least 5 VINs, "
+                "a resolved body, no conflicting powertrain evidence, and observed values for at least half the selected features "
+                "in each block (minimum 2 size and 1 powertrain features). Both blocks must have selected features."
+            )
     if selected:
         row = catalog.profiles.set_index("profile_id").loc[selected[0]]
         st.markdown("**" + profile_names(catalog.profiles)[selected[0]] + "**")
@@ -556,48 +631,6 @@ def category_dashboard(source, filters, key="v6_categories"):
     return True
 
 
-@st.cache_data(max_entries=32, show_spinner=False)
-def descriptive_themes(directory, receipt_key):
-    """Describe saved issue groups with distinctive terms from their source text."""
-    from sklearn.feature_extraction.text import TfidfVectorizer
-
-    path = Path(directory)
-    members = pd.read_parquet(path / "memberships.parquet")
-    members = members.loc[members.usable & members.theme.ge(0)].drop_duplicates("document_id")
-    # Bound display-only term extraction; never refit the saved issue groups.
-    members = members.sort_values("document_id").sample(frac=1, random_state=42).groupby("theme").head(200)
-    field = {"complaint": "summary", "defect": "summary", "hazard": "consequence", "remedy": "remedy"}[path.parent.parent.name]
-    documents = (pl.scan_parquet(path.parent.parent / "documents.parquet")
-                 .filter(pl.col("document_id").is_in(members.document_id.tolist()))
-                 .select("document_id", field).collect().to_pandas())
-    rows = members.merge(documents, on="document_id", validate="1:1")
-    if rows.empty:
-        return {}
-    texts = rows.groupby("theme")[field].agg(lambda values: " ".join(values.fillna("").astype(str)))
-    try:
-        encoder = TfidfVectorizer(stop_words="english", token_pattern=r"(?u)\b[a-zA-Z]{3,}\b", max_features=10000, sublinear_tf=True)
-        weights = encoder.fit_transform(texts).toarray()
-    except ValueError:
-        return {}
-    terms = encoder.get_feature_names_out()
-    labels = {}
-    for theme, weights_row in zip(texts.index, weights):
-        top = [terms[i] for i in np.argsort(-weights_row)[:4] if weights_row[i] > 0]
-        labels[int(theme)] = f"Theme {theme}: " + ", ".join(top)
-    return labels
-
-
-def descriptive_theme_arrows(directory, receipt_key):
-    arrows = pd.read_parquet(Path(directory) / "arrows.parquet").copy()
-    if not arrows.label.str.startswith("Theme ").any():
-        return arrows
-    for theme, label in descriptive_themes(directory, receipt_key).items():
-        mask = arrows.label.eq(f"Theme {theme}")
-        arrows.loc[mask, "label"] = label
-        arrows.loc[mask, "definition"] = "Projected issue-group prototype; distinctive terms from up to 200 saved narratives: " + label
-    return arrows
-
-
 def nhtsa_dashboard(source, filters, key="v6_nhtsa", view=None):
     catalog = active_catalog(source)
     if catalog is None:
@@ -609,6 +642,7 @@ def nhtsa_dashboard(source, filters, key="v6_nhtsa", view=None):
     profiles = catalog.scope(source, filters)
     families = set(profiles.family_id)
     if view == "Safety":
+        st.caption("Safety shows recorded crash-test ratings. Complaint and recall narratives are available in their respective evidence sections.")
         safety = catalog.safety.loc[catalog.safety.family_id.isin(families)].copy()
         if safety.empty:
             st.info("No saved safety variants match this selection.")
@@ -616,8 +650,7 @@ def nhtsa_dashboard(source, filters, key="v6_nhtsa", view=None):
         era = st.selectbox("Rating system", sorted(safety.rating_era.unique()), key=key + "_era")
         safety = safety.loc[safety.rating_era.eq(era)]
         selected = choose_profiles(safety, key + "_safety_selected", identity="vehicle_id")
-        mode = discovery_display(key + "_safety_display", safety=True)
-        path = catalog.path / "safety_projections" / era
+        mode = discovery_display(key + "_safety_display", safety=True, advanced=False)
         st.caption("Saved tested variants in one rating era. Side, pole and rollover ratings support cross-class display. Overall/frontal comparisons require the same class and supported ±250 lb weight context; see the source tables for those ratings.")
         names = profile_names(safety, "vehicle_id")
         safety = safety.sort_values(["Make", "Model", "ModelYear", "vehicle_id"]).set_index("vehicle_id", drop=False)
@@ -629,17 +662,6 @@ def nhtsa_dashboard(source, filters, key="v6_nhtsa", view=None):
         elif mode == "Compare vehicles":
             comparison_chart(safety.reindex(selected), COMPARABLE_RATINGS, names, key + "_safety_compare",
                              RATING_LABELS, domain=[0, 5])
-        elif path.exists():
-            metadata = projection_caption(path)
-            if metadata.get("status") == "completed":
-                points = pd.read_parquet(path / "points.parquet").merge(safety.reset_index(drop=True), left_on="entity_id", right_on="vehicle_id", validate="1:1")
-                show_arrows = st.checkbox("Show rating directions", value=False, key=key + "_safety_arrows")
-                arrows = pd.read_parquet(path / "arrows.parquet") if show_arrows else pd.DataFrame()
-                map_chart(points, arrows, selected, key + "_safety_map", "Structured crash-test rating locations")
-            else:
-                st.info("The saved safety projection has insufficient supported measures. Recorded star ratings remain available in Overview and Compare vehicles.")
-        else:
-            st.info("No saved safety projection is available for this rating era.")
         return True
     default_period = "latest_saved" if "latest_saved" in catalog.receipt["periods"] else catalog.receipt["periods"][0]
     period = st.segmented_control("Evidence period", catalog.receipt["periods"], default=default_period,
@@ -656,53 +678,33 @@ def nhtsa_dashboard(source, filters, key="v6_nhtsa", view=None):
     audit = a.read_json(catalog.text / "manifest.json")["audits"][period]
     st.caption(f"Evidence cutoff: {audit['cutoff']} · latest saved record: {audit['maximum_evidence_date']} · collection freshness unverified. Reports and campaigns do not establish failure rates.")
     names = profile_names(family_profiles, "family_id")
-    mode = discovery_display(key + "_display")
+    mode = discovery_display(key + "_display", advanced=False)
     text_available = (path / "family_features.parquet").exists()
     if mode in ("Overview", "Compare vehicles"):
-        pattern = st.segmented_control("Pattern", ["Reported components", "Narrative themes"], default="Reported components", key=key + "_pattern") or "Reported components"
         component = catalog.components(period)
         component = component.loc[component.source.eq("complaint" if channel == "complaint" else "recall")]
         fields = [c + ("_share" if channel == "complaint" else "_count") for c in COMPONENTS]
         labels = {field: name.capitalize() for field, name in zip(fields, COMPONENTS)}
         percentages = channel == "complaint"
-        values = component
-        if pattern == "Narrative themes":
-            if text_available:
-                values = pd.read_parquet(path / "family_features.parquet")
-                fields = sorted(field for field in values if field.startswith("theme_") and field.endswith("_share"))
-                descriptions = descriptive_themes(str(path), stat_key(path / "memberships.parquet"))
-                labels = {field: descriptions.get(int(field.split("_")[1]), "Theme " + field.split("_")[1]) for field in fields}
-                fields = st.multiselect("Themes to display", fields, default=fields[:8], format_func=labels.get,
-                                        key=key + "_themes_" + a.digest(str(path))[:12])
-                if not fields:
-                    st.info("Select at least one saved narrative theme to display.")
-                percentages = True
-                st.caption("Shares of usable saved narratives assigned to each issue group. Unassigned narratives remain in the denominator. Theme descriptions are automatic and unreviewed; themes are local to this text context.")
-            else:
-                values, fields = pd.DataFrame(columns=["family_id"]), []
-                st.info("Insufficient usable text or training vocabulary for saved narrative themes. Reported components remain available.")
-        else:
-            st.caption("Complaint cells show shares of saved reports; recall cells show campaign counts. Components can overlap. Unknown means no saved source evidence; a recorded zero is distinct from unknown.")
-        frame = family_profiles.merge(values, on="family_id", how="left", validate="1:1").set_index("family_id")
+        st.caption("Complaint cells show shares of saved reports; recall cells show campaign counts. Components can overlap. Unknown means no saved source evidence; a recorded zero is distinct from unknown.")
+        frame = family_profiles.merge(component, on="family_id", how="left", validate="1:1").set_index("family_id")
         frame = frame.reindex(columns=list(dict.fromkeys([*frame.columns, *fields])))
-        if fields:
-            if mode == "Overview":
-                page = overview_page(frame, key + "_" + pattern, selected_families)
-                heatmap_chart(page, fields, names, key + "_overview", labels, percentages=percentages,
-                              domain=[0, max(1, frame[fields].max().max())],
-                              color_title="Narrative share" if pattern == "Narrative themes" else ("Report share" if percentages else "Campaigns"))
-            else:
-                comparison_chart(frame.reindex(selected_families), fields, names, key + "_compare", labels,
-                                 percentages=percentages, domain=[0, 1] if percentages else None)
-            support = page if mode == "Overview" else frame.reindex(selected_families)
-            support_fields = [field for field in ("record_count", "usable_text_count", "usable_documents", "supported") if field in support]
-            if not support.empty:
-                details = support[[*a.FAMILY, *support_fields]].rename(columns={"ModelYear": "Model year",
-                    "record_count": "Saved reports" if channel == "complaint" else "Saved campaigns",
-                    "usable_text_count": "Usable summaries", "usable_documents": "Usable narratives",
-                    "supported": "Text support threshold met"})
-                st.dataframe(details, hide_index=True, width="stretch",
-                             alt="Evidence denominators and text support for displayed vehicle families")
+        if mode == "Overview":
+            page = overview_page(frame, key + "_components", selected_families)
+            heatmap_chart(page, fields, names, key + "_overview", labels, percentages=percentages,
+                          domain=[0, max(1, frame[fields].max().max())],
+                          color_title="Report share" if percentages else "Campaigns")
+        else:
+            comparison_chart(frame.reindex(selected_families), fields, names, key + "_compare", labels,
+                             percentages=percentages, domain=[0, 1] if percentages else None)
+        support = page if mode == "Overview" else frame.reindex(selected_families)
+        support_fields = [field for field in ("record_count", "usable_text_count", "supported") if field in support]
+        if not support.empty:
+            details = support[[*a.FAMILY, *support_fields]].rename(columns={"ModelYear": "Model year",
+                "record_count": "Saved reports" if channel == "complaint" else "Saved campaigns",
+                "usable_text_count": "Usable summaries", "supported": "Text support threshold met"})
+            st.dataframe(details, hide_index=True, width="stretch",
+                         alt="Evidence denominators and text support for displayed vehicle families")
     elif mode == "Similar vehicles":
         if not selected_families:
             st.info("Select a reference vehicle above to find similar saved narratives.")
@@ -712,19 +714,6 @@ def nhtsa_dashboard(source, filters, key="v6_nhtsa", view=None):
             st.caption("Reference: " + names[selected_families[0]] + ". Other Make/Model families within current filters, using the same saved reference-fold vectors. At least 20 usable complaints or one usable recall summary are required. Similarity is not a probability, safety score or failure rate.")
         else:
             st.info("No supported saved text vectors are available for this selection.")
-    elif (path / "family_points.parquet").exists():
-        projection_caption(path)
-        points = pd.read_parquet(path / "family_points.parquet").merge(family_profiles, left_on="entity_id", right_on="family_id", validate="1:1")
-        show_arrows = st.checkbox("Show word / theme directions", value=False, key=key + "_arrows")
-        arrows = descriptive_theme_arrows(str(path), stat_key(path / "arrows.parquet")) if show_arrows else pd.DataFrame()
-        st.caption("Each point is a model-year/make/model family, pooling trims. Diamonds mark selected families. The two-dimensional projection does not preserve every original distance.")
-        map_chart(points, arrows, selected_families, key + "_text_map", "Family text locations and optional feature directions")
-        if show_arrows:
-            st.caption("TF-IDF arrows show term loadings; embedding arrows show saved issue-group prototypes. Axes and theme IDs differ across periods, channels, representations and reference folds.")
-            st.dataframe(arrows[["label", "definition"]].rename(columns={"label": "Map label", "definition": "Meaning"}), hide_index=True,
-                         width="stretch", alt="Descriptions of terms and issue themes shown on the projection")
-    else:
-        st.info("No saved text projection is available for this selection.")
     if not selected_families:
         st.caption("Select a vehicle above to inspect its representative saved evidence.")
         return True
@@ -901,7 +890,9 @@ def search_lists(source, requirements, revision, config, legacy_catalog=None, *,
     spec = diverse_top(spec, order_prefix + ["specification_distance"], asc_prefix + [True], limit)
     warnings, price = [], pd.DataFrame()
     active = config.get("active_price")
-    if "recommendation_price" in config:
+    if "recommendation_price" in config and config["recommendation_price"] is None:
+        warnings.append("No compatible saved price checkpoint is available for model-relative ranking.")
+    elif "recommendation_price" in config:
         try:
             from car_app.recommendation_price import heldout_prices
             prediction = heldout_prices(config["recommendation_price"])

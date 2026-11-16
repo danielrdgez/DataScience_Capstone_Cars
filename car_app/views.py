@@ -27,7 +27,9 @@ def table(data, label, height=None, column_config=None):
 def listing_display(data):
     hidden = {"listing_id", "listed_date", "make_name", "model_name", "trim_name",
               "year", "daysonmarket", "vpic_matched", "cohort_complete",
-              "maximum_seating", "transmission"}
+              "maximum_seating", "transmission", "city_fuel_economy",
+              "highway_fuel_economy", "has_accidents", "frame_damaged",
+              "salvage", "theft_title", "major_options", "city"}
     first = [c for c in ["vin", *COHORT] if c in data.columns]
     remaining = [c for c in data.columns if c not in hidden and c not in first and c != "seats"]
     if "Transmission" in remaining and "seats" in data.columns:
@@ -503,88 +505,141 @@ def youtube(source, filters):
         return
     feature_args = (contract["directory"], contract["source_signature"])
     st.caption(f"Make-level experimental descriptors · Explicit-comment attribution · Cumulative cutoff: {contract['as_of']}")
-    with st.spinner("Reading supported make features…"):
-        data = query_snapshot(source.identity, filters, "youtube", *feature_args)
     available = query_snapshot(source.identity, Filters(), "youtube", *feature_args)
     eligible_cohorts, _ = filter_options(source.identity)
     available = available.filter(pl.col("Make").is_in(eligible_cohorts["Make"].drop_nulls().unique().to_list())) if "Make" in available.columns else available
-    base_makes = data["Make"].to_list() if "Make" in data.columns else []
-    options = sorted(set(available["Make"].to_list()) - set(base_makes)) if "Make" in available.columns else []
+    makes = sorted(available["Make"].drop_nulls().unique().to_list()) if "Make" in available.columns else []
+    if not makes:
+        st.info("No make has a saved feature row. This does not establish absence of discussion.")
+        return
+    if st.session_state.get("youtube_base_make") not in makes:
+        st.session_state["youtube_base_make"] = makes[0]
+    base_make = st.selectbox("YouTube make", makes, key="youtube_base_make")
+    st.caption("YouTube has its own make selection, starting with the first make alphabetically. "
+               "These charts and comments are independent of the dashboard sidebar filters.")
+    youtube_filters = Filters(makes=(base_make,))
+    data = available.filter(pl.col("Make") == base_make)
+    options = [make for make in makes if make != base_make]
     if st.session_state.get("youtube_compare_make") not in [None, *options]:
         st.session_state["youtube_compare_make"] = None
     comparison = st.selectbox("Compare with another make", [None, *options],
                               key="youtube_compare_make",
                               format_func=lambda value: "No comparison" if value is None else value)
-    st.caption("Comparison applies only to YouTube. The added make uses make-level evidence, independent of sidebar model/year and listing attributes.")
+    st.caption("Optional comparison applies to the two YouTube charts.")
     comparison_filters = Filters(makes=(comparison,)) if comparison else None
     if comparison_filters:
-        extra = query_snapshot(source.identity, comparison_filters, "youtube", *feature_args)
+        extra = available.filter(pl.col("Make") == comparison)
         data = pl.concat([data, extra]).unique(subset="Make", maintain_order=True).sort("Make")
     if data.is_empty():
         st.info("No selected make has a saved feature row. This does not establish absence of discussion.")
         return
     try:
-        inputs, additional = youtube_feature_tables(data, contract["columns"])
+        inputs, _ = youtube_feature_tables(data, contract["columns"])
     except ValueError as exc:
         st.warning(f"YouTube pricing inputs unavailable: {exc}")
         return
-    supported = data.filter(~pl.col("yt_support_suppressed"))
-    with st.container(horizontal=True):
-        st.metric("Matched makes", str(data.height), border=True)
-        st.metric("Makes with topic support", str(supported.height), border=True)
-        st.metric("Recorded comments across matched makes", f"{data['yt_comment_count'].sum():,}", border=True)
-    st.info("These observations describe makes, not selected years, models, or trims. Sentiment scores are experimental; independent automotive accuracy is unmeasured.")
-    st.subheader("YouTube inputs used by the Full pricing models")
-    st.caption(f"{len(contract['columns'])} recorded inputs per make. Base and Enhanced do not use YouTube. "
-               "Values are shown before model imputation, scaling or PCR; missing values remain missing.")
-    groups = ["All feature groups", *inputs["Group"].unique(maintain_order=True).to_list()]
-    if st.session_state.get("youtube_feature_group") not in [None, *groups]:
-        st.session_state["youtube_feature_group"] = groups[0]
-    group = st.selectbox("Feature group", groups, key="youtube_feature_group")
-    displayed = inputs if group == groups[0] else inputs.filter(pl.col("Group") == group)
-    table(displayed, "Recorded Full pricing inputs, definitions, values and evidence support", 550)
-    download(displayed, "Download displayed pricing inputs", "youtube_pricing_inputs.csv", "youtube_csv")
-    st.caption("Each feature appears once per make. Original counts accompany the two log-transformed inputs. "
-               "Semantic coordinates are learned text dimensions, not individual topic or sentiment scores.")
-    with st.expander("Model source"):
-        st.caption("Recorded Full runs: " + "; ".join(contract["runs"]))
-        st.caption("The source export and input list are checked against the selected pricing receipt, including matching continuation runs. "
-                   "A recorded input does not imply every estimator has finished training or establish a causal price effect.")
-    with st.expander("Discussion topic chart"):
-        topics = inputs.filter(pl.col("Group") == "Discussion topics").with_columns(
-            pl.col("Feature").str.replace("^yt_", "").str.replace("_mention_share$", "").str.replace_all("_", " ").alias("topic"),
-            (pl.col("Value").cast(pl.Float64, strict=False) * 100).alias("share_pct"),
-        ).drop_nulls("share_pct")
-        if not topics.is_empty():
-            chart = alt.Chart(topics.to_pandas()).mark_bar().encode(
-                y=alt.Y("topic:N", title=None), x=alt.X("share_pct:Q", title="Video-balanced mention share (%)"),
-                color="Make:N", yOffset="Make:N", tooltip=["Make", "topic", "share_pct"],
-            ).properties(height=370)
-            st.altair_chart(chart, alt="Supported make-level discussion topic shares")
-        else:
-            st.info("No supported topic shares are available for these makes.")
-        st.caption("This is the chart view of the same recorded topic inputs. Topic evidence needs 20 eligible comments and five videos; shares can overlap.")
-    if not additional.is_empty():
-        with st.expander("Additional YouTube evidence"):
-            st.caption("These exported measurements are excluded from the selected Full model inputs. "
-                       "Features and original counts already shown above are omitted here.")
-            table(additional.drop("Original count"), "Additional YouTube evidence excluded from the Full pricing inputs", 400)
-            download(additional.drop("Original count"), "Download additional evidence", "youtube_additional_evidence.csv", "youtube_additional_csv")
-    st.subheader("Example comments for selected makes")
-    comment_args = (contract["directory"], contract["as_of"], contract["source_signature"])
-    comments = query_snapshot(source.identity, filters, "youtube_comments", *comment_args)
-    if comparison_filters:
-        extra_comments = query_snapshot(source.identity, comparison_filters, "youtube_comments", *comment_args)
-        comments = pl.concat([comments.head(5), extra_comments.head(5)], how="diagonal_relaxed")
-    st.caption("Up to 10 saved comments with explicit make attribution and eligible scored text. "
-               "Examples describe makes, not selected years, models, or trims; they are not a representative sample.")
-    if comments.is_empty():
-        st.info("No eligible saved comment examples are available for these makes.")
+    st.caption("These observations describe makes, not selected years, models, or trims. "
+               "Sentiment is experimental; independent automotive accuracy is unmeasured.")
+    st.subheader("Discussion topics")
+    topics = inputs.filter(pl.col("Group") == "Discussion topics").with_columns(
+        pl.col("Feature").str.replace("^yt_", "").str.replace("_mention_share$", "").str.replace_all("_", " ").alias("topic"),
+        (pl.col("Value").cast(pl.Float64, strict=False) * 100).alias("share_pct"),
+    ).drop_nulls("share_pct")
+    if not topics.is_empty():
+        chart = alt.Chart(topics.to_pandas()).mark_bar().encode(
+            y=alt.Y("topic:N", title=None),
+            x=alt.X("share_pct:Q", title="Video-balanced mention share (%)", scale=alt.Scale(domain=[0, 100])),
+            color="Make:N", yOffset="Make:N",
+            tooltip=["Make:N", alt.Tooltip("topic:N", title="Topic"),
+                     alt.Tooltip("share_pct:Q", title="Mention share (%)", format=".1f")],
+        ).properties(height=max(370, 24 * topics.height))
+        st.altair_chart(chart, alt="Supported make-level discussion topic shares")
     else:
-        for row in comments.iter_rows(named=True):
-            with st.container(border=True):
-                st.caption(f"{row['Make']} · {row['video_title']} · {row['published_date']}")
-                st.text(row["text"])
+        st.info("No supported topic shares are available for these makes.")
+    st.caption("Video-balanced shares of eligible comments. Topics can overlap. "
+               "Topic evidence requires 20 eligible comments and five videos.")
+
+    st.subheader("Overall sentiment")
+    sentiment = data.filter(~pl.col("yt_overall_missing")).select(
+        "Make", "yt_overall_video_balanced_net", "yt_overall_mean_entropy",
+        "yt_overall_opinion_count", "yt_overall_opinion_video_count",
+    ).drop_nulls("yt_overall_video_balanced_net")
+    if not sentiment.is_empty():
+        bars = alt.Chart(sentiment.to_pandas()).mark_bar().encode(
+            y=alt.Y("Make:N", title=None),
+            x=alt.X("yt_overall_video_balanced_net:Q", title="Overall net sentiment (negative to positive)",
+                    scale=alt.Scale(domain=[-1, 1])),
+            color=alt.condition(alt.datum.yt_overall_video_balanced_net < 0,
+                                alt.value("#d97706"), alt.value("#2563eb")),
+            tooltip=["Make:N", alt.Tooltip("yt_overall_video_balanced_net:Q", title="Net sentiment", format=".3f"),
+                     alt.Tooltip("yt_overall_mean_entropy:Q", title="Tone uncertainty (0–1)", format=".3f"),
+                     alt.Tooltip("yt_overall_opinion_count:Q", title="Resolved opinions", format=",.0f"),
+                     alt.Tooltip("yt_overall_opinion_video_count:Q", title="Opinion videos", format=",.0f")],
+        )
+        zero = alt.Chart(pd.DataFrame({"zero": [0]})).mark_rule(color="#808080").encode(x="zero:Q")
+        st.altair_chart((bars + zero).properties(height=max(140, 32 * sentiment.height)),
+                        alt="Overall make sentiment on a fixed scale from minus one to one, centered at zero")
+    else:
+        st.info("No supported overall sentiment scores are available for these makes.")
+    missing_sentiment = sorted(set(data["Make"].to_list()) - set(sentiment["Make"].to_list()))
+    if missing_sentiment:
+        st.caption("Overall sentiment unavailable: " + "; ".join(missing_sentiment))
+    st.caption("Equal-video mean of (positive − negative) / all resolved opinions, including neutral and mixed. "
+               "Zero means balanced net sentiment. Missing evidence is omitted. Scores require 20 resolved opinions "
+               "and five opinion videos. Hover for support and tone uncertainty; uncertainty is not an error interval.")
+
+    with st.expander("How the YouTube pipeline works", key="youtube_walkthrough", on_change="rerun") as walkthrough:
+        if not walkthrough.open:
+            return
+        st.caption(f"One saved comment for {base_make}. The comparison make applies only to the charts. "
+                   "This example is not a representative sample or an explanation of an individual price prediction.")
+        comment_args = (contract["directory"], contract["as_of"], contract["source_signature"])
+        clauses = query_snapshot(source.identity, youtube_filters, "youtube_trace", *comment_args)
+        if clauses.is_empty():
+            st.info("No eligible saved comment walkthrough is available for this make.")
+        else:
+            youtube_comment_trace(clauses)
+
+
+def youtube_comment_trace(clauses):
+    from YOUTUBE.text.features import collapse_polarities
+
+    first = clauses.row(0, named=True)
+    st.markdown("**1. Original comment**")
+    st.caption(f"{first['Make']} · {first['video_title']} · {first['published_date']} · "
+               f"Comment ID: {first['comment_id']}")
+    st.text(first["text"])
+    st.markdown("**2. Saved clauses, topics, and sentiment**")
+    opinions = []
+    for index, row in enumerate(clauses.iter_rows(named=True), 1):
+        with st.container(border=True):
+            st.caption(f"Clause {index} · text positions {row['evidence_start']}–{row['evidence_end']}")
+            st.text(row["evidence_text"])
+            topics = ", ".join(topic.replace("_", " ") for topic in (row["topics"] or [])) or "None detected"
+            st.write(f"Content: {row['content_label'].replace('_', ' ')} · Topics: {topics}")
+            st.write(f"Saved overall tone: {row['overall_polarity']}")
+            reasons = []
+            if not row["feature_eligible"]:
+                reasons.append("not eligible vehicle content")
+            if row["development_excluded"]:
+                reasons.append("development evidence excluded")
+            if row["direct_price_mention"]:
+                reasons.append("direct numerical price mention")
+            st.caption("Feature eligibility: " + ("excluded — " + "; ".join(reasons) if reasons else "eligible"))
+            if row["model_truncated"] or row["windowed"]:
+                st.caption("Truncated or windowed evidence cannot resolve sentiment.")
+            if row["feature_eligible"] and not row["development_excluded"] and row["content_label"] == "vehicle_opinion":
+                opinions.append(row["overall_polarity"])
+    st.markdown("**3. From comment to make-level features**")
+    tone = collapse_polarities(opinions)
+    st.write(f"Combined overall opinion: {tone}.")
+    st.caption("Saved clause tones combine once per comment: opposing positive and negative tones become mixed; "
+               "any unresolved opinion clause leaves the overall opinion unresolved. Facts and questions do not become neutral opinions.")
+    st.caption("Eligible topic evidence and resolved opinions feed separate aggregates after date filtering and "
+               "within-video text deduplication. Comments aggregate within videos, then videos receive equal weight. "
+               "A make-level score requires 20 resolved opinions and five opinion-bearing videos. "
+               "Clause eligibility alone does not prove this comment survived deduplication. "
+               "The charts above show the final make-level results; no model is rerun here.")
 
 
 
@@ -593,20 +648,20 @@ def model_table(data, label, height=None):
         "feature_set": "Feature set", "model": "Model", "price_weighting": "Price weighting",
         "scope": "Evaluation scope", "requested_rows": "Rows matching selected filters", "rows": "Evaluated listings", "test_rows": "Test listings",
         "family_blocks": "Vehicle families", "support": "Sample support", "price_band": "Observed price band (USD)",
-        "mae": "Mean absolute error (USD)", "rmse": "Root mean squared error (USD)",
-        "mse": "Mean squared error (USD²)", "r2": "R² score",
-        "wape_pct": "Weighted absolute percentage error (%)",
-        "mean_signed_error": "Average prediction bias (USD)",
-        "p95_absolute_error": "95th percentile absolute error (USD)",
-        "base_mae": "Base mean absolute error (USD)",
-        "enriched_mae": "Enhanced mean absolute error (USD)",
-        "enriched_minus_base_mae": "Enhanced minus base error (USD)",
+        "mae": "MAE (USD)", "rmse": "RMSE (USD)",
+        "mse": "MSE (USD²)", "r2": "R²",
+        "wape_pct": "WAPE (%)",
+        "mean_signed_error": "Bias (USD)",
+        "p95_absolute_error": "P95 absolute error (USD)",
+        "base_mae": "Base MAE (USD)",
+        "enriched_mae": "Enhanced MAE (USD)",
+        "enriched_minus_base_mae": "Enhanced − base MAE (USD)",
     }
     columns = {}
     for name in data.columns:
         if name.startswith("validation_"):
             metric = name.removeprefix("validation_")
-            columns[name] = "Validation " + labels.get(metric, metric.replace("_", " ")).lower().replace("usd", "USD").replace("r²", "R²")
+            columns[name] = "Validation " + labels.get(metric, metric.replace("_", " "))
         else:
             columns[name] = labels.get(name, name.replace("_", " ").capitalize())
     table(data, label, height, column_config=columns)
@@ -701,9 +756,12 @@ def models(source, filters):
         return
     overall = pd.concat(aggregate, ignore_index=True)
     st.subheader("Overall saved performance")
+    st.caption("MAE = mean absolute error; RMSE = root mean squared error; "
+               "MSE = mean squared error; WAPE = weighted absolute percentage error; "
+               "R² = coefficient of determination; P95 = 95th percentile.")
     leading = [c for c in ["feature_set", "model", "price_weighting", "scope", "mae", "rmse", "r2",
                            "wape_pct", "mean_signed_error", "p95_absolute_error", "test_rows",
-                           "validation_mae", "validation_rmse", "validation_r2", "run", "split_strategy"] if c in overall]
+                           "validation_mae", "validation_rmse", "validation_r2", "split_strategy"] if c in overall]
     model_table(overall[leading], "Overall saved model performance", 360)
     download(overall, "Download overall metrics", "overall_metrics.csv", "overall_metrics_csv")
     st.caption("Model selection uses recorded validation MAE, not the best exposed test result. Bootstrap MAE intervals describe aggregate error uncertainty, not individual price intervals.")
@@ -726,6 +784,7 @@ def models(source, filters):
 
         st.caption("Low support means fewer than 100 evaluation rows or five vehicle families. Empty selections and undefined R² stay unavailable.")
     st.subheader("Prediction diagnostics and feature importance")
+    st.caption("Historical diagnostics use saved evaluation prices and vehicle attributes. Filters requiring attributes absent from the saved receipt also require an unchanged source snapshot.")
     feature_set = st.selectbox("Diagnostic feature set", candidates.feature_set.drop_duplicates().tolist(), key="diagnostic_feature_set")
     choices = candidates[candidates.feature_set.eq(feature_set)]
     model = st.selectbox("Estimator", choices.model.tolist(), key=f"diagnostic_estimator_{feature_set}")
@@ -744,7 +803,7 @@ def models(source, filters):
             st.warning(str(exc))
     shap = saved_shap(focus, model)
     if shap.empty:
-        st.info("No saved notebook explanation is available for this estimator.")
+        st.info("No explanation has been cached for this checkpoint. Run python -m car_app.model_registry --refresh-diagnostic-explanations to build it from the saved model and frozen inputs.")
     else:
         st.caption(f"{shap.attrs.get('method', 'Saved SHAP importance')}. Scale: {shap.attrs.get('scale', focus.metadata.get('shap_output_scale', 'unrecorded'))}. Overall explanation; vehicle filters do not scope it.")
         importance = shap.head(10).copy()
