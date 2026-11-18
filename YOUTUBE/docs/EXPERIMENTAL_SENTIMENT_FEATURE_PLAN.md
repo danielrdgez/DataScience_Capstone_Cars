@@ -1,6 +1,6 @@
 # Legacy pretrained YouTube sentiment benchmark
 
-This preserves the October 1, 2026 nine-aspect CPU prototype. New runs use the [GPU text pipeline](GPU_TEXT_RUNBOOK.md). The legacy entry point is `YOUTUBE/sentiment_pipeline.py`; its separate requirements are `YOUTUBE/requirements.txt`.
+The October 1, 2026 nine-aspect CPU prototype uses `YOUTUBE/sentiment_pipeline.py` and `YOUTUBE/requirements.txt`. For new runs, see the [GPU text pipeline](GPU_TEXT_RUNBOOK.md).
 
 ## Reproduce a bounded benchmark
 
@@ -34,6 +34,6 @@ The nine aspects are defined in the [label guide](MAKE_SENTIMENT_LABEL_GUIDE.md)
 
 ## Expert reference and evaluation
 
-`sentiment_pipeline.py expert --output-dir <new-dir>` exports the separate DougScore reference. `compare --reference-dir <reference> --feature-dir <features> --output-dir <new-dir>` creates descriptive panels with approved identities; it also accepts GPU text make features. The [expert plan](../../EXPERT_REVIEWS/DOUGSCORE_INTEGRATION_PLAN.md) owns aspect mappings and pairing limitations.
+`sentiment_pipeline.py expert --output-dir <new-dir>` exports the DougScore reference. `compare --reference-dir <reference> --feature-dir <features> --output-dir <new-dir>` uses approved identities to build descriptive panels. It also accepts GPU-generated make features. [Expert aspect mappings and pairing limits](../../EXPERT_REVIEWS/DOUGSCORE_INTEGRATION_PLAN.md)
 
 Saved engineering outputs are `sentiment_inference_v1`, `sentiment_inference_10k_v1`, `sentiment_features_v1`, and `sentiment_features_10k_v1` under `YOUTUBE/outputs/`. Independent automotive sentiment accuracy remains unmeasured. Historical text/score availability and identical VIN populations/splits are required for forecasting claims; current source additions are retrospective experiments. Price commands and selected predictors are documented in the [README](../../README.md#listing-price-models) and [dictionary](../../DATA_DICTIONARY.md#selected-youtube-predictors).

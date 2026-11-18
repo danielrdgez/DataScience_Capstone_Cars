@@ -1,8 +1,8 @@
 # Supervised relevance and aspect runbook
 
-This optional labeling route is preserved; new labeling remains deferred. New raw-source runs follow the [GPU runbook](GPU_TEXT_RUNBOOK.md). The [supervised plan](MAKE_SENTIMENT_PIPELINE_PLAN.md) owns status and release gates; [the label guide](MAKE_SENTIMENT_LABEL_GUIDE.md) owns target/aspect semantics.
+New labeling is deferred. See the supervised plan for release criteria and the label guide for target and aspect definitions. Use the GPU runbook for new raw-source runs. [Supervised plan](MAKE_SENTIMENT_PIPELINE_PLAN.md) · [Label guide](MAKE_SENTIMENT_LABEL_GUIDE.md) · [GPU runbook](GPU_TEXT_RUNBOOK.md)
 
-Run PowerShell from the repository root with `.venv`. Outputs are immutable: use fresh names for completed runs and changed inputs/settings. Frozen source/sample files and annotations must stay intact. Commands below reproduce named historical stages; choose unused output paths before running them.
+Run PowerShell from the repository root with `.venv`. The commands show historical run names. Choose fresh output paths for completed stages or changed settings and preserve frozen sources, samples, and annotations.
 
 ## Prepare and label relevance
 

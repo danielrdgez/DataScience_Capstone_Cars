@@ -360,6 +360,20 @@ def load_predictor(run, model, metadata_hash, predictor_hash, source_signature=(
     return predictor, metadata
 
 
+def checkpoint_prediction_inputs(vins, selection):
+    """Load the pinned predictor and assemble its raw inputs in VIN order."""
+    receipt = read_json(ROOT / "MODEL_OUTPUT" / selection["run"] / "run_metadata.json")
+    source_signature = tuple((name, stat_key(path)) for name, path in price_sources(receipt).items())
+    code_fingerprint = inference_code_fingerprint()
+    predictor, metadata = load_predictor(selection["run"], selection["model"], selection["metadata_sha256"],
+        selection["predictor_sha256"], source_signature, code_fingerprint)
+    frame = prediction_inputs(tuple(vins), metadata["model_type"],
+        metadata.get("expert_features", {}).get("directory", ""),
+        metadata.get("youtube_features", {}).get("directory", ""), source_signature, code_fingerprint,
+        metadata.get("compatible_expert_vpic_sha256"))
+    return predictor, metadata, frame.select(metadata["raw_feature_columns"]).to_pandas()
+
+
 def price_estimates(listings: pl.DataFrame, config=None):
     """Supplement returned listings; never change their eligibility or order."""
     config = registry() if config is None else config
@@ -367,16 +381,8 @@ def price_estimates(listings: pl.DataFrame, config=None):
     if not active or listings.is_empty():
         return listings, "No price model is activated."
     try:
-        from MODELS.Price_ML_Models import MODEL_FEATURE_SETS
-        receipt = read_json(ROOT / "MODEL_OUTPUT" / active["run"] / "run_metadata.json")
-        source_signature = tuple((name, stat_key(path)) for name, path in price_sources(receipt).items())
-        code_fingerprint = inference_code_fingerprint()
-        predictor, metadata = load_predictor(active["run"], active["model"], active["metadata_sha256"], active["predictor_sha256"], source_signature, code_fingerprint)
-        frame = prediction_inputs(tuple(listings["vin"].to_list()), metadata["model_type"],
-            metadata.get("expert_features", {}).get("directory", ""),
-            metadata.get("youtube_features", {}).get("directory", ""), source_signature, code_fingerprint,
-            metadata.get("compatible_expert_vpic_sha256"))
-        values = np.asarray(predictor.predict(frame.select(MODEL_FEATURE_SETS[metadata["model_type"]]).to_pandas()))
+        predictor, metadata, raw = checkpoint_prediction_inputs(listings["vin"].to_list(), active)
+        values = np.asarray(predictor.predict(raw))
         if len(values) != listings.height or not np.isfinite(values).all() or (values <= 0).any():
             raise ValueError("Invalid USD predictions")
         return listings.with_columns(pl.Series("predicted_price_usd", values),

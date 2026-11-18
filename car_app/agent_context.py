@@ -299,7 +299,7 @@ class RecommendationContext:
         full_prices = self.prices(ids)
         provenance = {row["candidate_id"]: {family: {key: value for key, value in model.items() if key not in ("explanation", "predicted_price_usd", "use")}
                       for family, model in row["models"].items()} for row in full_prices}
-        prices = [{**row, "models": {family: {key: model[key] for key in ("predicted_price_usd", "prediction_kind", "use")}
+        prices = [{**row, "models": {family: {key: model[key] for key in ("predicted_price_usd", "prediction_kind", "use", "explanation") if key in model}
                    for family, model in row["models"].items()}} for row in full_prices]
         evidence = []
         for row in self.evidence(ids):

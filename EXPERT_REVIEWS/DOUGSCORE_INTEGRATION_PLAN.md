@@ -1,17 +1,10 @@
 # DougScore expert baseline integration
 
-`price_features.py` builds year/make/model expert features with an equal-model make fallback; trim is not a match key. The [dictionary](../DATA_DICTIONARY.md#selected-dougscore-predictors) owns field definitions, support thresholds, matching rules, and coverage. The [README](../README.md#dougscore-expert-features) owns price-export commands.
+`price_features.py` matches reviews by year, make, and model, with a make fallback that weights models equally. See the dictionary for fields, matching, and coverage, and the README for export commands. [Data dictionary](../DATA_DICTIONARY.md#selected-dougscore-predictors) · [Export commands](../README.md#dougscore-expert-features)
 
 ## Source profile
 
-Source snapshot: `outputs/dougscore_v1/`; original input SHA-256 below.
-
-SHA-256: `5b93a406ad014c7b473b3dcef69360d69c93249bf89815416899b373030f1600`.
-The [executed audit notebook](DOUGSCORE_AUDIT.ipynb) contains the exact checks
-and saved outputs. [The machine-readable profile](outputs/dougscore_profile.json)
-records execution time, missingness, ranges, and source hash. The input remains
-unchanged in Downloads; the exact hashed snapshot is now imported into
-`outputs/dougscore_v1/` without altering the audit notebook.
+The snapshot in `outputs/dougscore_v1/` was imported from the CSV in Downloads, whose SHA-256 is `5b93a406ad014c7b473b3dcef69360d69c93249bf89815416899b373030f1600`. The audit notebook contains the checks and outputs. The JSON profile records execution time, missingness, ranges, and the source hash. [Audit notebook](DOUGSCORE_AUDIT.ipynb) · [Profile](outputs/dougscore_profile.json)
 
 | Check | Observed result | Consequence |
 | --- | --- | --- |
@@ -51,12 +44,7 @@ This optional paired-review study remains unimplemented. It requires verified re
 | Practicality | None directly | Keep as `expert_practicality`; it cannot isolate `fuel_economy_range`. |
 | Cool Factor | None directly | Keep as `expert_cool_factor` for desirability/enthusiast preference. |
 
-The current nine-aspect comment schema stays unchanged. Dedicated expert
-baselines for `reliability`, `maintenance_cost`, `fuel_economy_range`, and
-`safety` are unavailable in this source. Do not manufacture them from Quality,
-Practicality, Handling, or overall DougScore. Expanding the community schema to
-practicality/build quality/desirability can be considered later with new label
-definitions and examples; it is not necessary for initial integration.
+Use the current nine-aspect comment schema. Leave the expert baselines for `reliability`, `maintenance_cost`, `fuel_economy_range`, and `safety` unavailable. Quality, Practicality, Handling, and the overall score do not define those aspects. Adding practicality, build quality, or desirability to the comment schema would require new label definitions and examples.
 
 For a paired study:
 

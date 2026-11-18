@@ -1902,15 +1902,22 @@ similarity_dashboard(None, Filters())
 
     def test_price_evidence_renders_without_extra_inference_or_provider_call(self):
         from car_app.agent import AgentAnswer, RankedCandidate, run_turn
+
+        explanation = {"method": "TreeSHAP", "baseline_log_price": np.log(12000) - .2,
+                       "contributions": [{"feature": "horsepower", "signed_log_price": .2}],
+                       "other_features_log_price": 0.}
+        model = {"model": "catboost", "run": "fixture", "feature_set": "full",
+                 "prediction_kind": "held_out_test", "predicted_price_usd": 12000,
+                 "use": "Held-out historical estimate.", "explanation": explanation}
+
         async def provider(c, inputs, config):
             c.search()
-            self.review(c)
+            with patch("car_app.agent_context.compare_prices", return_value=({"listing:a": {"tree": model}}, [])):
+                evidence = json.loads(c.tool_result(lambda: c.context.recommendation_evidence(["listing:a"])))
+            self.assertEqual(evidence["price_evidence"][0]["models"]["tree"]["explanation"], explanation)
             return self.provider_result(AgentAnswer(message="Historical results", questions=[],
-                listings=[RankedCandidate(candidate_id="listing:a", reason="Catalog facts", tradeoff="Condition is unverified.", comparison="Fits the price priority.", source_refs=["listing:a:facts"])], cohorts=[]))
+                listings=[RankedCandidate(candidate_id="listing:a", reason="Catalog facts", tradeoff="Condition is unverified.", comparison="Fits the price priority.", source_refs=["listing:a:facts", "listing:a:price_evidence"])], cohorts=[]))
         result = run_turn(self.source, self.requirements, 1, self.categories, "Show results", [], {}, provider=provider)
-        model = {"model": "catboost", "run": "fixture", "feature_set": "full", "oof_mae_usd": 1000,
-                 "prediction_kind": "out_of_fold", "fold": 2, "predicted_price_usd": 12000}
-        result["source_refs"]["listing:a:price_evidence"] = {"models": {"catboost": model}}
         script = '''import streamlit as st
 from car_app.agent_ui import render_result
 from car_app.state import RecommendationPanel
@@ -1920,6 +1927,7 @@ render_result(RESULT, 'local', st.session_state['panel'], None, {})
         with patch("car_app.recommendation_price.oof.inference_rows") as inference, patch("car_app.agent._provider_run") as remote:
             app = AppTest.from_string(script).run()
             self.assertFalse(app.exception)
+            self.assertTrue(any("Why each model estimated this price" in element.value for element in app.markdown))
             remote.assert_not_called()
             inference.assert_not_called()
             self.assertFalse(any(button.key == "local_prices" for button in app.button))
@@ -2091,10 +2099,44 @@ class TreeLinearPricePolicyTests(unittest.TestCase):
         models = {"tree": {"model": "catboost"}, "linear": {"model": "ridge"}, "unavailable": []}
         heldout = pd.DataFrame({"vin": ["a"], "predicted_price_usd": [15000.]})
         missing = pd.DataFrame({"vin": pd.Series(dtype=str), "predicted_price_usd": pd.Series(dtype=float)})
+        tree_explanation = {"method": "TreeSHAP"}
         with patch("car_app.recommendation_price.checkpoint_prices", side_effect=[heldout, missing]), \
-             patch("car_app.model_registry.price_estimates", return_value=(pl.DataFrame({"vin": ["a"], "predicted_price_usd": [14000.]}), None)):
+             patch("car_app.model_registry.price_estimates", return_value=(pl.DataFrame({"vin": ["a"], "predicted_price_usd": [14000.]}), None)), \
+             patch("car_app.recommendation_price.checkpoint_contributions",
+                   side_effect=[{"a": tree_explanation}, ValueError("Reference changed")]):
             result, warnings = price_evidence(pl.DataFrame({"vin": ["a"]}), models)
-        self.assertFalse(warnings)
+        self.assertIn("Linear price explanations unavailable", warnings[0])
         self.assertEqual(set(result["listing:a"]), {"tree", "linear"})
         self.assertEqual(result["listing:a"]["tree"]["prediction_kind"], "held_out_test")
+        self.assertEqual(result["listing:a"]["tree"]["explanation"], tree_explanation)
         self.assertEqual(result["listing:a"]["linear"]["prediction_kind"], "supplemental_inference")
+        self.assertNotIn("explanation", result["listing:a"]["linear"])
+
+    def test_linear_terms_reproduce_the_estimate_and_reject_a_mismatched_price(self):
+        from types import SimpleNamespace
+
+        from sklearn.compose import ColumnTransformer
+        from sklearn.linear_model import LinearRegression
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import FunctionTransformer, StandardScaler
+
+        from car_app.recommendation_price import checkpoint_contributions
+
+        background = pd.DataFrame({"mileage": [0., 10., 20.]})
+        encoder = ColumnTransformer([("numeric", StandardScaler(), ["mileage"])])
+        model = Pipeline([("preprocess", encoder), ("model", LinearRegression())])
+        model.fit(background, [10., 9., 8.])
+        predictor = SimpleNamespace(named_steps={"input": FunctionTransformer(),
+                                               "estimator": SimpleNamespace(estimator=model)})
+        raw = pd.DataFrame({"mileage": [20., 0.]})
+        metadata = {"target_transform": "natural_log", "shap_background": "reference.parquet",
+                    "shap_input_sha256": {"reference.parquet": "hash"}}
+        with patch("car_app.model_registry.checkpoint_prediction_inputs", return_value=(predictor, metadata, raw)), \
+             patch("car_app.model_registry.digest", return_value="hash"), \
+             patch("car_app.recommendation_price.pd.read_parquet", return_value=background):
+            explanations = checkpoint_contributions({"run": "fixture"}, "linear", {"a": np.exp(8.), "b": np.exp(9.)})
+        self.assertEqual(set(explanations), {"a"})
+        explanation = explanations["a"]
+        self.assertAlmostEqual(explanation["baseline_log_price"], 9.)
+        self.assertAlmostEqual(explanation["contributions"][0]["signed_log_price"], -1.)
+        self.assertAlmostEqual(explanation["other_features_log_price"], 0.)

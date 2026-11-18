@@ -6,6 +6,7 @@ import importlib.metadata
 from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import polars as pl
 
@@ -194,7 +195,6 @@ def check_checkpoint(selection):
 
 def checkpoint_prices(selection):
     """Only saved, unique test VINs may support model-relative historical ranking."""
-    import numpy as np
     path = check_checkpoint(selection)
     rows = pd.read_parquet(path / (selection["model"] + "_test_predictions.parquet"), columns=["vin", "prediction"])
     split = pd.read_parquet(path / "split_manifest.parquet")
@@ -203,6 +203,98 @@ def checkpoint_prices(selection):
             or not np.isfinite(rows.prediction).all() or not rows.prediction.gt(0).all()):
         raise ValueError("Historical price ranking requires unique valid held-out test predictions")
     return rows.rename(columns={"prediction": "predicted_price_usd"})
+
+
+def linear_contributions(model, prepared, background):
+    """Center the fitted linear terms on the mean encoded training reference."""
+    from scipy import sparse
+
+    encoder = model.named_steps["preprocess"]
+    regression = model.named_steps["model"]
+    encoded = encoder.transform(prepared)
+    reference = np.asarray(encoder.transform(background).mean(axis=0)).ravel()
+    values = encoded.toarray() if sparse.issparse(encoded) else encoded
+    weights = regression.coef_
+    baseline = float(regression.intercept_ + reference @ weights)
+    return list(encoder.get_feature_names_out()), (values - reference) * weights, np.full(len(prepared), baseline)
+
+
+def tree_contributions(name, model, prepared, metadata):
+    """Return signed TreeSHAP terms in the fitted estimator's feature space."""
+    if name == "catboost":
+        from catboost import Pool
+
+        inputs = Pool(prepared, cat_features=metadata["categorical_features"])
+        values = model.get_feature_importance(inputs, type="ShapValues", thread_count=4)
+    elif name == "xgboost":
+        import xgboost as xgb
+
+        inputs = xgb.DMatrix(prepared, enable_categorical=True)
+        values = model.get_booster().predict(inputs, pred_contribs=True)
+    elif name == "lightgbm":
+        values = model.predict(prepared, pred_contrib=True)
+    elif name == "random_forest":
+        import shap
+        from scipy import sparse
+
+        encoder = model.named_steps["preprocess"]
+        inputs = encoder.transform(prepared)
+        explainer = shap.TreeExplainer(model.named_steps["model"])
+        values = explainer.shap_values(inputs.toarray() if sparse.issparse(inputs) else inputs)
+        return list(encoder.get_feature_names_out()), values, np.full(len(prepared), float(np.asarray(explainer.expected_value).item()))
+    else:
+        raise ValueError("Unsupported tree explanation")
+    return list(prepared.columns), values[:, :-1], values[:, -1]
+
+
+def checkpoint_contributions(selection, family, estimates):
+    """Explain only candidate rows whose contributions reconcile to the delivered price."""
+    from car_app.model_registry import checkpoint_prediction_inputs, digest
+
+    predictor, metadata, raw = checkpoint_prediction_inputs(estimates, selection)
+    if metadata.get("target_transform") != "natural_log":
+        raise ValueError("Expected a natural-log price checkpoint")
+    prepared = predictor.named_steps["input"].transform(raw)
+    model = predictor.named_steps["estimator"].estimator
+    if family == "linear":
+        filename = metadata["shap_background"]
+        background_path = ROOT / "MODEL_OUTPUT" / selection["run"] / filename
+        if digest(background_path) != metadata["shap_input_sha256"][filename]:
+            raise ValueError("Saved training reference changed")
+        background = pd.read_parquet(background_path)
+        if background.empty or list(background.columns) != list(prepared.columns):
+            raise ValueError("Saved training reference does not match checkpoint inputs")
+        features, values, bases = linear_contributions(model, prepared, background)
+        method = "baseline-centered linear contributions"
+        reference = "mean encoded features from the frozen training sample"
+    else:
+        features, values, bases = tree_contributions(selection["model"], model, prepared, metadata)
+        method = "TreeSHAP"
+        reference = "TreeSHAP expected prediction"
+
+    if values.shape != (len(estimates), len(features)) or bases.shape != (len(estimates),):
+        raise ValueError("Contribution dimensions do not match candidate rows and features")
+    log_prices = np.asarray(model.predict(prepared), dtype=float)
+    if log_prices.shape != (len(estimates),):
+        raise ValueError("Predictions do not match candidate rows")
+    reconstructed = bases + values.sum(axis=1)
+    valid = (np.isfinite(values).all(axis=1) & np.isfinite(bases)
+             & np.isclose(reconstructed, log_prices, rtol=0, atol=1e-5)
+             & np.isclose(np.exp(log_prices), list(estimates.values()), rtol=1e-7, atol=.01))
+    result = {}
+    for index, vin in enumerate(estimates):
+        if not valid[index]:
+            continue
+        terms = values[index]
+        top = np.argsort(-np.abs(terms), kind="stable")[:4]
+        result[vin] = {
+            "method": method, "reference": reference, "scale": "ln(price in USD)",
+            "baseline_log_price": float(bases[index]), "predicted_log_price": float(log_prices[index]),
+            "contributions": [{"feature": features[i], "signed_log_price": float(terms[i])}
+                              for i in top if terms[i] != 0],
+            "other_features_log_price": float(terms.sum() - terms[top].sum()),
+        }
+    return result
 
 
 def checkpoint_evidence(listings, models):
@@ -234,4 +326,17 @@ def checkpoint_evidence(listings, models):
             for evidence in result.values():
                 evidence.pop(family, None)
             warnings.append(family + " price evidence unavailable: " + str(exc))
+            continue
+        estimates = {vin: result["listing:" + vin][family]["predicted_price_usd"]
+                     for vin in listings["vin"].to_list() if family in result["listing:" + vin]}
+        if not estimates:
+            continue
+        try:
+            explanations = checkpoint_contributions(selection, family, estimates)
+            for vin, explanation in explanations.items():
+                result["listing:" + vin][family]["explanation"] = explanation
+            if len(explanations) != len(estimates):
+                warnings.append(f"{family.capitalize()} price explanations failed to reproduce some displayed estimates.")
+        except Exception as exc:
+            warnings.append(f"{family.capitalize()} price explanations unavailable ({type(exc).__name__}).")
     return result, warnings

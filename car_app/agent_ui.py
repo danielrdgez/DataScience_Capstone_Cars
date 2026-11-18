@@ -165,18 +165,32 @@ def render_result(result, key, panel=None, source=None, config=None, legacy=None
                 st.caption(str(explanation.get("method")) + " · " + str(explanation.get("scale")) + ". Global associations do not explain this vehicle's price or buyer suitability.")
             else:
                 st.caption(explanation["status"])
-        comparisons = []
-        selected_ids = {r["candidate_id"] for r in result["answer"]["listings"]}
-        for cid in selected_ids:
+        comparisons, attributions = [], []
+        for item in result["answer"]["listings"]:
+            cid = item["candidate_id"]
             candidate = result["candidates"][cid]
             price = result["source_refs"].get(cid + ":price_evidence", {})
             for family, model in price.get("models", {}).items():
                 comparisons.append({**{c: candidate.get(c) for c in COHORT}, "family": family,
                     **{k: model.get(k) for k in ("predicted_price_usd", "prediction_kind", "fold", "model", "feature_set", "run", "validation_mae_usd", "oof_mae_usd", "missing_feature_count")}})
+                explanation = model.get("explanation")
+                if explanation:
+                    terms = [
+                        ("Baseline", explanation["baseline_log_price"]),
+                        *((term["feature"], term["signed_log_price"]) for term in explanation["contributions"]),
+                        ("Other features combined", explanation["other_features_log_price"]),
+                    ]
+                    attributions.extend({"Vehicle": vehicle_title(candidate), "Model": model["model"],
+                        "Term": label, "Log price": value} for label, value in terms)
         if comparisons:
             st.dataframe(pd.DataFrame(comparisons), hide_index=True, width="stretch",
                          alt="Selected tree and linear historical price estimates and provenance")
             st.caption("Held-out test prices exclude each vehicle from fitting. Supplemental inference may include fitting VINs and cannot support held-out value ranking. Estimates are historical; no verified discount or prediction interval is established.")
+        if attributions:
+            st.markdown("**Why each model estimated this price**")
+            st.caption("Positive terms raise the estimate from its model baseline. Negative terms lower it. The baseline and contributions add up on the natural-log price scale.")
+            st.dataframe(pd.DataFrame(attributions), hide_index=True, width="stretch",
+                         alt="Price baselines and signed feature contributions for each vehicle and model")
         for warning in dict.fromkeys(result["warnings"]):
             st.caption(warning)
         if result.get("exclusions"):

@@ -1,6 +1,6 @@
 # YouTube workflow guide
 
-Use `text_pipeline.py` in `.venv-youtube` for new raw-source runs. The [GPU runbook](docs/GPU_TEXT_RUNBOOK.md) owns setup, commands, saved-run identities, recovery, and calibration. The [dictionary](../DATA_DICTIONARY.md#selected-youtube-predictors) owns the selected sentiment-v2 schema and measured coverage; the [README](../README.md#listing-price-models) owns price training.
+Use `text_pipeline.py` in `.venv-youtube` for new raw-source runs. [Setup and recovery](docs/GPU_TEXT_RUNBOOK.md) · [Sentiment-v2 fields and coverage](../DATA_DICTIONARY.md#selected-youtube-predictors) · [Price training](../README.md#listing-price-models)
 
 Remaining work:
 

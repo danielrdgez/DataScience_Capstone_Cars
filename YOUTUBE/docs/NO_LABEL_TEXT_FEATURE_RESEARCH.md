@@ -1,6 +1,6 @@
 # YouTube text features without new manual labels
 
-Research/artifact review: October 5, 2026. The recommended semantic/topic and reduced-sentiment route is implemented in `YOUTUBE/text_pipeline.py`; the [GPU runbook](GPU_TEXT_RUNBOOK.md) owns execution and saved runs. This note retains the evidence and alternatives behind that choice. Reported literature results were not reproduced on this corpus.
+This October 5, 2026 review compares methods for representing YouTube topics and sentiment without new labels. The chosen route runs through `YOUTUBE/text_pipeline.py`. The cited studies report results on other corpora. [GPU runbook and saved runs](GPU_TEXT_RUNBOOK.md)
 
 ## Available evidence
 
@@ -54,9 +54,7 @@ matches alone must not be treated as reliable polarity labels.
 
 ## Papers to use in the capstone
 
-Each proposed adaptation below is a project recommendation, not a result measured
-on these YouTube comments. Benchmark results from other domains do not establish
-in-domain accuracy or a price-model improvement.
+The studies suggest methods to test. Measuring automotive accuracy and price-model gains requires local evaluation.
 
 | Paper | Evidence and practical use | Fit boundary |
 | --- | --- | --- |
@@ -79,7 +77,7 @@ in-domain accuracy or a price-model improvement.
 - The 2026 extraction lacks deleted comments and historical text/engagement versions. Cardiff pretraining includes 2021 text. Earlier publication dates alone do not establish a valid 2020 forecasting simulation.
 - Software behavior, evidence fidelity, perturbation sensitivity, support, runtime, and downstream errors can be measured without new labels. Independent in-domain sentiment accuracy cannot.
 
-[DougScore integration](../../EXPERT_REVIEWS/DOUGSCORE_INTEGRATION_PLAN.md) owns the expert snapshot, aspect mappings, and pairing design. Expert/community agreement is descriptive consistency, not sentiment truth; their scales remain separate.
+Compare expert and community measurements on their original scales. Agreement describes consistency between the sources. [DougScore snapshot, aspect mappings, and pairing design](../../EXPERT_REVIEWS/DOUGSCORE_INTEGRATION_PLAN.md)
 
 ## Reproduce the local evidence
 

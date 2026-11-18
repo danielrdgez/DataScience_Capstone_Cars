@@ -1,12 +1,12 @@
 # AI vehicle recommendation: implementation and evidence contract
 
-Status: November 15, 2026. Recommendation pricing currently selects the best completed tree and linear checkpoints by validation MAE. Full CatBoost OOF remains an optional offline workflow. Implemented behavior does not establish buyer suitability.
+As of November 15, 2026, recommendation pricing selects the completed tree and linear checkpoints with the lowest validation MAE. Full CatBoost OOF is an optional offline workflow. Buyer suitability still needs evaluation.
 
 ## Architecture and sources
 
-This is a retrieval-augmented recommendation agent with structured tools. Python applies requirements and retrieves bounded catalog/model/evidence context; GPT-6 Luna clarifies preferences, explains tradeoffs, and reorders eligible IDs. Full CatBoost OOF training and the final inference fit are explicit offline workflows. No training, vector fitting, ensemble or learned preference score runs inside an AI request.
+Python applies buyer requirements and retrieves a bounded set of candidates with model and source evidence. GPT-6 Luna clarifies preferences, explains tradeoffs, and orders eligible IDs. Requests use saved models and vectors. Preference ordering uses the buyer's stated priorities.
 
-The [data dictionary](../DATA_DICTIONARY.md) defines source fields, transformations, populations and missingness. Runtime loaders validate actual schemas, saved manifests and artifact receipts. The dictionary describes data; it is not an embedding index or the catalog itself.
+The app validates source schemas, manifests, and artifact receipts. For field definitions, transformations, populations, and missingness, see the [data dictionary](../DATA_DICTIONARY.md).
 
 | Input | Grain and role | Interpretation |
 | --- | --- | --- |
@@ -35,9 +35,13 @@ Read `DATA/CAR_DATA_FINAL/`. Join listings to vPIC on lowercase `vin`, never dec
 
 `recommendation_price.kind = best_tree_linear_v1` selects one completed tree and one completed linear checkpoint from the dashboard's configured `price_run_selection`. Compatible Full continuations remain eligible per estimator. Select by validation MAE, never test error; the current winners are Full CatBoost and Full multiple linear regression. Both estimates reach the mandatory evidence tool and evidence table separately. No averaging or training occurs during recommendation.
 
-Saved unique test predictions must belong to the saved test VIN partition before they support historical model-relative ranking. The tree is the primary ranking model, with the linear model used if no tree checkpoint exists. Other requested VINs may receive supplemental inference using the verified feature assembly; these may be fitting VINs, so they cannot support held-out value ranking or evaluation. The corrected source snapshot requires a hash-bound equivalence proof against original source files and a frozen-input/prediction replay for each estimator. Exact-checkpoint global TreeSHAP and linear coefficients accompany the AI context when their explanation receipts match the predictor and frozen inputs. These are global, noncausal explanations, not vehicle-specific weights. Estimates retain model, feature set, run, hashes, validation MAE and prediction type. Missing evidence is disclosed without removing otherwise eligible observed-price browsing.
+Saved unique test predictions must belong to the saved test VIN partition before they support historical model-relative ranking. The tree is the primary ranking model, with the linear model used if no tree checkpoint exists. Other requested VINs may receive supplemental inference using the verified feature assembly and may include fitting VINs, so held-out value ranking and evaluation exclude them. The corrected source snapshot requires a hash-bound equivalence proof against original source files and a frozen-input/prediction replay for each estimator. Estimates retain model, feature set, run, hashes, validation MAE and prediction type. Observed-price browsing remains available when model evidence is missing.
 
-The explicit `MODELS.price_oof` training/validation/activation commands remain available. Activating an OOF bundle switches the recommendation policy back to that bundle. Existing source fields, feature definitions and cohort joins are unchanged.
+When price matters, the agent explains where the two estimates agree or differ. It reads up to ten global feature entries per checkpoint after verifying the explanation receipt against the predictor and frozen inputs. CatBoost's mean absolute TreeSHAP measures average contribution magnitude in log-price units. A linear coefficient measures fitted change per encoded unit with other inputs held fixed. The agent uses these explanations for pricing only.
+
+For each requested candidate, compute signed TreeSHAP for the tree and `coefficient × (encoded value − reference mean)` for the linear predictor. The tree baseline is its SHAP expected prediction. The linear baseline applies the coefficients to mean encoded values in the hash-verified frozen training sample and adds the intercept. Check log-price additivity and replay the displayed USD estimate. Return the four largest signed terms by magnitude and the sum of the rest. If an explanation fails verification, the estimate can still be used.
+
+The explicit `MODELS.price_oof` training/validation/activation commands remain available. An activated OOF bundle supplies fold-specific estimates and provenance only.
 
 ## Agent, tools and state
 
@@ -50,13 +54,13 @@ Read `OPENAI_API_KEY` and `OPENAI_MODEL=gpt-6-luna` server-side from ignored roo
 | `update_preferences` | Atomic changes with exact supporting quotes from the current user message; validate observed labels and questionnaire rules. Numeric values must occur in quoted text. |
 | `search_eligible_catalog` | Apply raw requirements and return bounded IDs, facts, exclusions and separate specification/price/safety signals. |
 | `get_specification_peers` | Read saved reference-context specification evidence for up to six retrieved listing IDs. |
-| `get_price_evidence` | Read selected tree and linear held-out or supplemental inference USD estimates, prediction type and per-candidate predictor provenance for up to six IDs. |
-| `get_recommendation_evidence` | Required before answering: retrieve each final candidate's price, specification and dated source evidence, retaining its own fold provenance. |
+| `get_price_evidence` | Read the selected tree and linear USD estimates, prediction provenance and available signed price drivers for up to six IDs. |
+| `get_recommendation_evidence` | Required before answering. Retrieve each final candidate's price drivers, estimate provenance, specification comparisons and dated source evidence. |
 | `get_source_evidence` | Retrieve separately dated NHTSA, make-level YouTube and expert evidence for up to six listing or complete-cohort IDs. Cohorts retain family/make scope and never inherit an individual member's subgroup assignment. |
 
 Strict tool schemas and application validation allow only retrieved IDs and allowlisted fields. Callers cannot supply artifact paths. Narratives and earlier assistant prose are untrusted data and cannot authorize preference changes.
 
-Keep version-3 requirements and use the version-4 agent envelope/recommendation policy, including dictionary identity and delivered-evidence IDs. Invalidate older results without discarding buyer requirements. Record snapshot/artifact identities, candidate facts, deterministic lists, selected IDs, source references, warnings and telemetry. Send at most six recent messages; retain twenty in the UI. Current structured requirements remain authoritative.
+Use version-3 requirements and the version-5 agent result envelope, including dictionary identity and delivered-evidence IDs. Invalidate older results while preserving buyer requirements. Record snapshot and artifact identities, candidate facts, deterministic lists, selected IDs, source references, warnings and telemetry. Send at most six recent messages and retain twenty in the UI. Current structured requirements remain authoritative.
 
 - The form asks for an observed-price budget and primary priority; mileage, seating, use and additional preferences may remain unspecified. Ask at most one blocking clarification, rather than repeating optional questions. Retain up to three ordered priorities for compatible conversations. Validate clear edits; clarify broad descriptions rather than inferring constraints. Treat mileage/fuel-economy units as unverified and reject unsupported unit claims in candidate reasons. No numerical suitability score or arbitrary preference/value blend is used.
 - Pool distinct-family priority retrieval with supported specification, held-out price and safety lists; deduplicate VINs and cap at 24 listings. Performance uses advertised horsepower; passenger-space retrieval uses seating; lower-mileage and lower-price priorities use their named fields. Default retrieval uses mileage. These are limited proxies, not general suitability scores. Attach saved profiles and their own held-out subgroup contexts. Retrieve at most ten complete cohorts and aggregate all qualifying members.
@@ -83,6 +87,6 @@ The optional smoke command explicitly makes at most two real submissions with th
 .\.venv\Scripts\python.exe -m car_app.agent --live-smoke
 ```
 
-Offline tests cover preference edits, hard limits, distinct-family cards, evidence delivery, provider-call isolation, fallback labels, and source/model compatibility. The optional smoke checks request validity and a follow-up budget edit; it does not measure recommendation relevance or guarantee latency. Human usability evaluation, independent text validation, calibrated price intervals, and deployment remain separate work.
+The smoke test checks request validity and the follow-up budget edit. Recommendation relevance, latency guarantees, human usability, independent text validation, calibrated price intervals, and deployment need separate evaluation or work.
 
 Implementation references: [Agents SDK](https://developers.openai.com/api/docs/guides/agents/sdk), [GPT-6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna), [function calling](https://developers.openai.com/api/docs/guides/function-calling). Retrieval/orchestration research includes [InteRecAgent](https://arxiv.org/abs/2308.16505) and [RecLLM](https://arxiv.org/abs/2305.07961); these studies do not validate this catalog or ranking policy.

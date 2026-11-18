@@ -365,13 +365,14 @@ def _vpic_join(
         mismatch_any = identity_checks[0]
         for check in identity_checks[1:]:
             mismatch_any = mismatch_any | check
+        joined_columns = set(joined.collect_schema().names())
         sample = _collect(
             joined.with_columns(_scope_expression())
             .filter(mismatch_any & (pl.col("vehicle_scope") == "used"))
             .select([column for column in (
                 "vin", "listing_id", "is_new", "year", "ModelYear", "make_name",
                 "Make", "model_name", "Model", "Trim", "ErrorCode",
-            ) if column in joined.collect_schema().names()])
+            ) if column in joined_columns])
             .head(500)
         )
         _write_csv(sample, output_dir / "used_listing_vpic_name_mismatch_sample.csv")
@@ -438,24 +439,26 @@ def _source_date_profile(
 def _issue_availability(
     joined: pl.LazyFrame | None, joined_error: str | None,
     data_dir: Path, output_dir: Path,
-) -> tuple[pl.DataFrame, pl.DataFrame]:
+) -> pl.DataFrame:
+    sources = (
+        ("nhtsa_complaints", "dateComplaintFiled"),
+        ("nhtsa_recalls", "ReportReceivedDate"),
+    )
     profiles = pl.concat([
-        _source_date_profile("nhtsa_complaints", PARQUET_FILES["nhtsa_complaints"],
-                             "dateComplaintFiled", data_dir),
-        _source_date_profile("nhtsa_recalls", PARQUET_FILES["nhtsa_recalls"],
-                             "ReportReceivedDate", data_dir),
+        _source_date_profile(table, PARQUET_FILES[table], date_column, data_dir)
+        for table, date_column in sources
     ], how="diagonal_relaxed")
     _write_csv(profiles, output_dir / "nhtsa_event_date_profile.csv")
 
     if joined is None:
-        return profiles, pl.DataFrame([{
+        return pl.DataFrame([{
             "source": "complaints and recalls", "status": "not run",
             "reason": joined_error or "VIN-linked listing/vPIC join is unavailable.",
         }])
     joined_schema = joined.collect_schema()
     required_proxy = {"observation_date_proxy", "ModelYear", "Make", "Model"}
     if not required_proxy.issubset(joined_schema.names()):
-        return profiles, pl.DataFrame([{
+        return pl.DataFrame([{
             "source": "complaints and recalls", "status": "not run",
             "reason": "The join does not have the date proxy and vPIC year/make/model keys.",
         }])
@@ -468,10 +471,6 @@ def _issue_availability(
         _normalized_string("Model").alias("_model"),
     )
     timing_rows: list[dict[str, Any]] = []
-    sources = (
-        ("nhtsa_complaints", "dateComplaintFiled"),
-        ("nhtsa_recalls", "ReportReceivedDate"),
-    )
     for table_name, date_column in sources:
         path = data_dir / PARQUET_FILES[table_name]
         if not path.is_file():
@@ -515,7 +514,7 @@ def _issue_availability(
             "date_field": date_column, **result,
             "interpretation": "Potential future-information exposure only; the proxy is not a verified price timestamp.",
         })
-    return profiles, pl.DataFrame(timing_rows)
+    return pl.DataFrame(timing_rows)
 
 
 def _review_candidates(
@@ -656,7 +655,7 @@ def run_diagnostics(
         )
     _write_csv(date_profile, output_dir / "date_proxy_notes.csv")
 
-    issue_profile, timing = _issue_availability(joined, join_error, data_dir, output_dir)
+    timing = _issue_availability(joined, join_error, data_dir, output_dir)
     _write_csv(timing, output_dir / "issue_availability_vs_date_proxy.csv")
     review = _review_candidates(
         joined, listing_schema, output_dir, price_low=price_low,

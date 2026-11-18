@@ -464,7 +464,7 @@ def fetch_vpic(conn: sqlite3.Connection, server: str, database: str, driver: str
     mssql = connect_vpic(server, database, driver)
     source = conn.execute("""SELECT vin, MIN(year) FROM used_cars
       WHERE vin IS NOT NULL AND trim(vin) <> '' GROUP BY vin ORDER BY vin""")
-    total = processed = 0
+    processed = 0
     try:
         while True:
             source_rows = source.fetchmany(batch_size)
@@ -510,22 +510,21 @@ def fetch_vpic(conn: sqlite3.Connection, server: str, database: str, driver: str
                                 value_col = normalized.get("value")
                                 if label_col is not None and value_col is not None:
                                     got_variable_set = True
+                                    code_col = normalized.get("code")
+                                    qcd_col = normalized.get("tobeqcd")
+                                    element_col = normalized.get("elementid")
                                     for row in cursor.fetchall():
                                         label = row[label_col]
-                                        code_col = normalized.get("code")
                                         code = row[code_col] if code_col is not None else None
-                                        qcd_col = normalized.get("tobeqcd")
                                         qcd = row[qcd_col] if qcd_col is not None else None
-                                        element_col = normalized.get("elementid")
                                         element_id = row[element_col] if element_col is not None else None
                                         variable_id = (element_id if element_id is not None else
                                                        code if code is not None else label)
                                         if variable_id is None:
                                             continue
-                                        output_row = {
-                                            columns[i]: (None if row[i] is None else str(row[i]))
-                                            for i in range(len(columns))
-                                        }
+                                        output_row = dict(zip(columns, row))
+                                        group = output_row.get("GroupName")
+                                        data_type = output_row.get("DataType")
                                         name = code if code not in (None, "") else qcd
                                         if name in (None, ""):
                                             name = label
@@ -535,20 +534,8 @@ def fetch_vpic(conn: sqlite3.Connection, server: str, database: str, driver: str
                                             "variable_name": str(name),
                                             "value": None if value is None else str(value),
                                             "variable_label": None if label is None else str(label),
-                                            "group_name": output_row.get("GroupName"),
-                                            "value_id": output_row.get("AttributeId"),
-                                            "pattern_id": output_row.get("PatternId"),
-                                            "vin_schema_id": output_row.get("VinSchemaId"),
-                                            "variable_keys": output_row.get("Keys"),
-                                            "element_id": output_row.get("ElementId"),
-                                            "attribute_id": output_row.get("AttributeId"),
-                                            "created_on": output_row.get("CreatedOn"),
-                                            "wmi_id": output_row.get("WmiId"),
-                                            "data_type": output_row.get("DataType"),
-                                            "decode_method": output_row.get("Decode"),
-                                            "source": output_row.get("Source"),
-                                            "to_be_qcd": output_row.get("ToBeQCd"),
-                                            "source_json": json.dumps(output_row, ensure_ascii=False),
+                                            "group_name": None if group is None else str(group),
+                                            "data_type": None if data_type is None else str(data_type),
                                         })
                             if not cursor.nextset():
                                 break
@@ -599,9 +586,8 @@ def fetch_vpic(conn: sqlite3.Connection, server: str, database: str, driver: str
                 conn.commit()
                 LOG.error("Local vPIC chunk failed for %s VINs: %s", len(batch), exc)
             processed += len(source_rows)
-            total += len(source_rows)
-            if total % 10000 == 0 or (limit is not None and processed >= limit):
-                LOG.info("Decoded %s unique VINs locally", total)
+            if processed % 10000 == 0 or (limit is not None and processed >= limit):
+                LOG.info("Decoded %s unique VINs locally", processed)
     finally:
         mssql.close()
 

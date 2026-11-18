@@ -1,13 +1,8 @@
 # Make-level YouTube comment pilot: labeling guide
 
-**Current context (October 6, 2026):** new manual labeling is deferred. This guide
-is retained for the optional supervised pilot. New raw-source processing follows
-[the GPU text runbook](GPU_TEXT_RUNBOOK.md) and does not require this annotation round.
+Manual labeling for this optional pilot was deferred on October 6, 2026. New raw-source runs can proceed without these annotations. [GPU text runbook](GPU_TEXT_RUNBOOK.md)
 
-This pilot first labels whether a comment discusses a vehicle, then asks whether
-it expresses an opinion about the target make.
-All collected videos are car reviews; video eligibility is not filtered. It does
-not measure reliability or change selected model inputs.
+First label whether the comment discusses a vehicle. Then record whether it expresses an opinion about the target make. All collected videos are car reviews and stay eligible. The labels describe opinions and relevance, outside the selected price inputs.
 Keep `comment_id`, `video_id`, and the original `text` unchanged in the sample.
 
 ## Video make context
@@ -42,7 +37,7 @@ concerns purchase price, depreciation, and value. A remark such as “CVT sucks�
 is short but potentially relevant; it must not be excluded by a length rule.
 “Great video!” is about the creator or video, even if the video features a car.
 
-Toyota feedback is keyed by `comment_id`; `vehicle_specific` confirms relevance only, and `not_vehicle_specific` excludes aspect scoring. It does not establish make, opinion, or polarity. The [relevance runbook](RELEVANCE_ROUND_RUNBOOK.md) owns label recovery, review, and classifier validation.
+Match Toyota feedback on `comment_id`. A `vehicle_specific` label confirms relevance only. A `not_vehicle_specific` label excludes the comment from aspect scoring. Make, opinion, and polarity need their own labels. [Relevance runbook](RELEVANCE_ROUND_RUNBOOK.md)
 
 ## Structured make and aspect rounds
 

@@ -45,14 +45,14 @@ flowchart LR
 
 ## Setup and data preparation
 
-Run PowerShell commands from the repository root. Large data, model outputs, environments, credentials, and browser receipts are ignored by Git. Keep saved run logs and manifests for reproducibility; Python caches and `.playwright-cli/` are disposable.
+Run these PowerShell commands from the repository root. Git ignores large data, model outputs, virtual environments, credentials, and browser receipts. Keep run logs and manifests. Python caches and `.playwright-cli/` are disposable.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-app.txt
 ```
 
-Collection needs the listing CSV, SQL Server 2019+, and the Microsoft ODBC Driver. Restore the vPIC backup using [restore_vpic_database.sql](NHTSA/restore_vpic_database.sql), adjusting paths and instance first:
+Collection needs the listing CSV, SQL Server 2019+, and the Microsoft ODBC Driver. Set the paths and instance in [restore_vpic_database.sql](NHTSA/restore_vpic_database.sql), then restore the vPIC backup before running collection.
 
 ```powershell
 .\.venv\Scripts\python.exe NHTSA/build_car_data_db.py --load-only
@@ -60,7 +60,7 @@ Collection needs the listing CSV, SQL Server 2019+, and the Microsoft ODBC Drive
 .\.venv\Scripts\python.exe YOUTUBE/YOUTUBE_COMMENTS_API.py
 ```
 
-`--load-only` replaces listing rows; other collection resumes saved work. `--only vpic`, `recalls`, `complaints`, or `safety` limits NHTSA collection. YouTube uses `YOUTUBE_API_KEY` or `GOOGLE_API_KEY` from the environment or ignored root `.env` and consumes quota.
+`--load-only` replaces listing rows. Other collection resumes saved work. Pass `--only vpic`, `--only recalls`, `--only complaints`, or `--only safety` to collect one NHTSA source. The local vPIC decoder saves values and variable metadata to SQLite. YouTube reads `YOUTUBE_API_KEY` or `GOOGLE_API_KEY` from the environment or ignored root `.env` and consumes quota.
 
 Export and profile the selected six tables:
 
@@ -69,7 +69,9 @@ Export and profile the selected six tables:
 .\.venv\Scripts\python.exe EDA/profile_data_dictionary.py
 ```
 
-The exporter applies shared eligibility exclusions, aligns vPIC to one row per retained lowercase `vin`, validates the replacement snapshot, and writes `manifest.json`; SQLite stays read-only. Missing decodes retain null source fields, and duplicate retained decode keys abort publication. Export vPIC together with listings. To align an existing snapshot without re-exporting its other tables, run `.\.venv\Scripts\python.exe EDA/DATA_CLEANING.py --align-vpic-only`; this saves a rollback copy and records matched/missing counts in the manifest. Review cohort outliers with `MODELS/cohort_price_mileage_review.py` and source integrity with `MODELS/price_data_diagnostics.py`. Exact fields and eligibility rules belong in the [dictionary](DATA_DICTIONARY.md#data-rules).
+Export vPIC with listings. The exporter applies the eligibility rules, validates the replacement Parquets, and writes `manifest.json` while reading SQLite in read-only mode. Missing decodes get null source fields. Duplicate retained decode keys stop publication.
+
+Use `.\.venv\Scripts\python.exe EDA/DATA_CLEANING.py --align-vpic-only` to realign vPIC in an existing snapshot. It saves a rollback copy and logs match counts in the manifest. Use `MODELS/cohort_price_mileage_review.py` for cohort outliers and `MODELS/price_data_diagnostics.py` for source integrity and event timing. The profiler records which tables it refreshed in the [data dictionary](DATA_DICTIONARY.md#data-rules).
 
 ```mermaid
 flowchart LR
@@ -79,7 +81,7 @@ flowchart LR
   P --> C[Validate unique keys, equal populations, and manifest]
 ```
 
-`EDA/price_mileage_plotly.py` exports full-population histograms and boxplots of `ln(1 + price)` and `ln(1 + mileage)` for the presentation's price and mileage slide, with HTML, PNG, and summary receipts under `outputs/slide13_update/charts/`. Logs compress the right tails and retain zeros. PNG export uses Kaleido and an installed Chrome browser.
+`EDA/price_mileage_plotly.py` writes full-population histograms and boxplots of `ln(1 + price)` and `ln(1 + mileage)`. HTML, PNG, and summary receipts for the presentation slide go to `outputs/slide13_update/charts/`. The log transform compresses the right tails and retains zeros. PNG export needs Kaleido and Chrome.
 
 ```mermaid
 flowchart LR
@@ -92,7 +94,7 @@ flowchart LR
 
 ### YouTube GPU text features
 
-Use the [GPU runbook](YOUTUBE/docs/GPU_TEXT_RUNBOOK.md) for CUDA setup, teacher/student training, scoring, relabeling, aggregation, calibration, and recovery. The selected export is `YOUTUBE/outputs/sentiment_argmax_20261027T155951/price/`: 75 candidate fields for 83 makes, of which price models select 40. Coverage and field definitions are in the [dictionary](DATA_DICTIONARY.md#selected-youtube-predictors).
+The selected export, `YOUTUBE/outputs/sentiment_argmax_20261027T155951/price/`, contains 75 candidate fields for 83 makes. Price models use 40. See the runbook for setup, training, scoring, and recovery, and the dictionary for exact fields and coverage. [GPU runbook](YOUTUBE/docs/GPU_TEXT_RUNBOOK.md) · [Selected YouTube predictors](DATA_DICTIONARY.md#selected-youtube-predictors)
 
 <a id="previous-youtube-sentiment-benchmark-workflow"></a>
 Earlier experiments remain available through the [legacy sentiment plan](YOUTUBE/docs/EXPERIMENTAL_SENTIMENT_FEATURE_PLAN.md), [relevance runbook](YOUTUBE/docs/RELEVANCE_ROUND_RUNBOOK.md), and [research review](YOUTUBE/docs/NO_LABEL_TEXT_FEATURE_RESEARCH.md).
@@ -105,7 +107,7 @@ Earlier experiments remain available through the [legacy sentiment plan](YOUTUBE
 .\.venv\Scripts\python.exe -m EXPERT_REVIEWS.price_features --output-dir EXPERT_REVIEWS/outputs/price_features_v2
 ```
 
-Later builds need a fresh directory and `--expert-feature-dir` during price training. The [dictionary](DATA_DICTIONARY.md#selected-dougscore-predictors) owns matching, support, and the eight-rating/two-source-field predictor definition.
+Give later exports a fresh directory and pass it to price training with `--expert-feature-dir`. Matching rules and the eight ratings and two source fields are defined in the dictionary. [Selected DougScore predictors](DATA_DICTIONARY.md#selected-dougscore-predictors)
 
 ## Listing-price models
 
@@ -122,7 +124,7 @@ Later builds need a fresh directory and `--expert-feature-dir` during price trai
 | `full_youtube_expert_coverage` | Full YouTube plus expert coverage | 140 |
 | `full` | Enhanced safety, YouTube, and expert fields | 148 |
 
-Counts exclude generated missingness indicators. Default splits hold out disjoint VINs within decoded year/make/model strata with at least 25 eligible VINs, approximately 60/20/20. Trim pools only for splitting. `unseen_family` provides a separate transfer experiment. Preprocessing fits training rows; validation selects settings, then fit-plus-validation refits produce final test predictions. Models fit `ln(price)` and predict USD. Comparisons require matching populations, sources, partitions, and protocols.
+Counts exclude generated missingness indicators. The default split assigns distinct VINs to fit, validation, and test at about 60/20/20 within decoded year/make/model strata with at least 25 eligible VINs. Pool trims for splitting. Use `unseen_family` to test transfer to held-out families. Fit preprocessing on training rows and select settings on validation. Refit on fit plus validation before predicting the test partition. Models fit `ln(price)` and predict USD. Compare runs with matching populations, sources, partitions, and protocols.
 
 ```powershell
 .\.venv\Scripts\python.exe -m MODELS.Price_ML_Models `
@@ -146,7 +148,9 @@ Reports retain USD errors, R², WAPE, bias, block-bootstrap intervals, subgroup 
 
 ### Recommendation pricing
 
-The current dashboard policy (`best_tree_linear_v1`) selects the lowest validation-MAE completed tree and linear checkpoints from `price_run_selection`, including compatible per-estimator Full continuations. The AI receives both estimates separately without averaging, together with verified saved global explanations for the exact checkpoints. The current winners are Full CatBoost and Full multiple linear regression. Saved test predictions alone support model-relative value ranking; other candidate estimates are labeled supplemental inference and may include fitting VINs. Source/schema/package and frozen inference replay checks remain required. A source-equivalence receipt allows the corrected snapshot only after comparing all retained listing/vPIC values with the original files, verifying removed listings were outside the model split, and replaying frozen inputs and predictions.
+The dashboard policy `best_tree_linear_v1` takes the completed tree and linear checkpoints with the lowest validation MAE in `price_run_selection`, including compatible Full continuations. It currently selects Full CatBoost and Full multiple linear regression. The AI receives separate estimates and verified explanations for each checkpoint. Only saved test predictions support model-relative value ranking. Supplemental inference can include fitting VINs and is labeled accordingly.
+
+The app checks source, schema, package versions, and frozen inference replay. The receipt for the corrected snapshot compares all retained listing and vPIC values with the original files, checks that removed VINs were outside the model split, and replays frozen inputs and predictions.
 
 ```powershell
 .\.venv-youtube\Scripts\python.exe -m streamlit run app.py
@@ -156,7 +160,7 @@ The current dashboard policy (`best_tree_linear_v1`) selects the lowest validati
 
 `MODELS.price_oof` uses the existing Full inputs and eligible population. Ten deterministic VIN folds rotate within decoded year/make/model strata; Trim stays separate and pools only for splitting. Every historical prediction excludes its VIN from fitting, preprocessing and inner parameter selection. Each fold selects settings on its own training portion with an inner 80/20 split, then refits on the other nine outer folds. A separate final selection/refit uses all eligible rows for new-vehicle inference. Training is sequential and does not activate itself.
 
-The default uses 200,000-row cohort-covered tuning samples and unlimited tree-budget expansion until early stopping, followed by the existing full inner-validation measurement and outer refit. It retains the log-price objective/iteration stopping and USD validation-MAE parameter selection. This is ten selection/refit workflows plus a final workflow, not eleven simple fits. The complete eligible dataset rotates through CV; there is no separate final test partition.
+By default, each of the ten folds and the final workflow uses 200,000-row tuning samples with cohort coverage. The tree budget expands until early stopping on the log-price objective. Tuning selects by USD validation MAE. The workflow then measures the selected settings on full inner validation before refitting. Cross-validation uses all eligible rows, leaving no separate final test partition.
 
 Run from the repository root in the dashboard environment:
 
@@ -194,7 +198,7 @@ Score genuinely new VINs from listing Parquet rows without a price label:
   --run "$OofRun" --input "DATA/new_listings.parquet" --output "MODEL_OUTPUT/new_listing_prices.parquet"
 ```
 
-Supply lowercase `vin` and observed listing fields. Enrichment uses the saved vPIC/YouTube/expert sources; missing decodes/features stay missing and use fitted preprocessing. Output includes missing-feature counts and historical-scope warnings. This does not fetch new decodes or establish current market prices. Training VINs must use the OOF bank instead; an existing output file is never overwritten.
+Supply lowercase `vin` and observed listing fields. Enrichment reads saved vPIC, YouTube, and expert data and passes missing inputs to fitted preprocessing. The output reports missing-feature counts and historical-scope warnings. Use the OOF bank for training VINs and choose a fresh output path. Prediction uses the saved decodes and historical price scope.
 
 OOF metrics are conditional on the previously selected feature set and existing price-informed dataset exclusions. They measure predictions for unseen VINs within represented vehicle strata, not unseen families or independently validated future prices. Later YouTube/expert snapshots remain retrospective context; the final all-data model has no separate test score.
 
@@ -228,9 +232,11 @@ This creates a validation workspace with eight estimators and both weighting tre
 
 The dashboard's **Vehicle categories** page uses validated full v7 run `20261114T204920` through the registry's `discovery_run`. Both model and trim-cohort views load this bundle, show a **Discovery v7** caption, and use its saved assignments and projections. The bundle contains 10,827 model profiles and 21,226 trim-cohort profiles, each covering the same 2,792,993 VINs across 45 body/fold contexts per grain.
 
-V7 assigns every model and trim-cohort profile within its body category, including unresolved bodies. It bypasses the v6 identity, five-VIN, powertrain-conflict and per-block observation eligibility gates, partition acceptance gates, and 95th-percentile assignment-radius rejection. It uses family-weighted K-means with development-fitted numeric median imputation, categorical missing markers, scaling and encoding. The highest sampled development silhouette selects among feasible configured cluster counts (2–8 for full runs); no minimum silhouette or stability score rejects the winner. Contexts with no usable development variation receive one group. These are exploratory assignments, not evidence of sufficient data or stable groups.
+V7 assigns every model and trim-cohort profile within its body category, including unresolved bodies. It skips v6's identity, five-VIN, powertrain-conflict, block coverage, partition acceptance, and 95th-percentile distance checks. Family-weighted K-means uses development-fitted median imputation, scaling, and encoding, with missing markers for categorical values. The highest sampled development silhouette wins among feasible cluster counts (2–8 for full runs). V7 applies no minimum silhouette or stability cutoff. A context with no usable development variation receives one exploratory group.
 
-V7 preparation retains available profile medians/modes without five-observation, IQR or categorical-agreement masking. Source reconciliation still preserves unknown/conflicting source values and audit flags. Only fields with development variation enter clustering; coverage, redundancy and horsepower-scale selection gates are bypassed. Family-held-out folds, lowercase-VIN joins, separate cohort columns, NHTSA text policies, direct-peer shared-observation requirements remain in place. Every profile appears in the saved group map using development-median imputation; contexts unable to fit a two-axis numeric projection display all profiles at the origin. Imputed clustering inputs do not replace observed values in charts. V7 records `grouping_version=7` in the compatible v6 artifact schema; existing v6 bundles remain readable.
+Preparation keeps available medians and modes without masking for fewer than five observations, IQR, or categorical agreement. Source reconciliation preserves unknowns, conflicts, and audit flags. Clustering uses fields with development variation, skipping coverage, redundancy, and horsepower-scale checks. It still uses family-held-out folds, lowercase-`vin` joins, separate cohort columns, and the existing NHTSA text and direct-peer rules.
+
+The saved map uses development-median imputation to place every profile. Contexts that cannot fit two numeric axes place all profiles at the origin. Feature charts use observed values. V7 records `grouping_version=7` in the v6 artifact schema, which also reads existing v6 bundles. Treat the groups as exploratory.
 
 ```mermaid
 flowchart LR
@@ -255,8 +261,7 @@ Write-Host "Save this run path: $DiscoveryV7Run"
 
 After interruption, set `$DiscoveryV7Run` to the saved original path and run `.\MODELS\run_vehicle_discovery.ps1 -Version 7 -RunRoot $DiscoveryV7Run -Resume`. Resume requires unchanged inputs, code, environment, encoder and device. Do not use a v6 run directory. After successful activation, launch `.\.venv-youtube\Scripts\python.exe -m streamlit run app.py`.
 
-Completed stages and specification body/fold contexts are retained on resume; only the unfinished context is refitted before later contexts continue. JSON receipts use unique sibling temporary files and retry permission-denied replacements for up to about five seconds to tolerate brief Windows file locks. Persistent permission errors still stop the runner and preserve the previous receipt.
-Resume compares configuration in its saved JSON representation, so tuple-valued cluster counts match their saved lists. Changes to configuration values, producer code, dependencies or package versions still block resume.
+Resume keeps completed stages and body/fold fits, then restarts the unfinished context. For JSON receipts, the runner writes to unique sibling temporary files and retries permission-denied replacements for about five seconds. Persistent locks stop the run and preserve the previous receipt. Resume compares configuration as saved JSON, so tuples and their serialized lists match.
 
 ```mermaid
 flowchart LR
@@ -278,7 +283,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
 .\MODELS\run_vehicle_discovery.ps1
 ```
 
-The [runner](MODELS/run_vehicle_discovery.ps1) performs preflight, regression checks, smoke/full fitting, evidence attachment, peer comparison, validation, and activation, stopping on failure. It needs a complete locally cached MiniLM snapshot; `-EmbeddingModel '<local-snapshot>'` selects one and `-Device cpu` forces CPU. No model downloads occur. Outputs include `prepared/`, `text/`, `specs/`, `bundle/`, `peer-comparison/`, and `validation/`.
+The runner uses the same preflight, test, build, and activation sequence as above. Pass `-Device cpu` to force CPU. It uses a complete local MiniLM cache without downloading models. Outputs include `prepared/`, `text/`, `specs/`, `bundle/`, `peer-comparison/`, and `validation/`. [Discovery runner](MODELS/run_vehicle_discovery.ps1)
 
 Resume using `-RunRoot '<printed-directory>' -Resume` with matching inputs, code, environment, encoder, and device. Completed stages are immutable. After a repair, preserve a failed stage under a new name before restarting it; keep completed prerequisite manifests unchanged. Encoder lookup honors Hugging Face cache variables and accepts transformer exports without `modules.json`, recording mean pooling and a 256-token window.
 
@@ -341,7 +346,7 @@ flowchart LR
   N --> E[Selected vehicle source evidence]
 ```
 
-YouTube uses a local make selection independent of sidebar filters. Two charts show different measurements: topic mention shares and overall net sentiment, with at most two makes compared. Choices come from the selected Full run's verified source export and eligible catalog makes. Sentiment uses the fixed −1 to 1 scale. The collapsed **How the YouTube pipeline works** section shows one primary-make comment and all its saved explicit-attribution clauses, content labels, topics, overall tones, and eligibility decisions. It combines opinion clauses using the pipeline's existing rule and explains date filtering, deduplication, and equal-video aggregation; eligibility does not prove final deduplicated membership. The semantic chart and separate example-comment list are omitted to avoid clutter and repeated text. Saved feature exports and model inputs are unchanged. Cached snapshot readers refresh when source data or `car_app/data.py` changes, so hot reloads use the current reader methods.
+YouTube choices come from the selected Full run's verified export and eligible catalog makes. Overall sentiment uses a fixed −1 to 1 scale. The pipeline walkthrough shows saved content labels and the opinion-clause combination rule. It explains date filtering, deduplication, and equal-video aggregation. An eligible comment can still be dropped as a duplicate. Cached readers refresh when source data or `car_app/data.py` changes.
 
 ```mermaid
 flowchart LR
@@ -356,7 +361,7 @@ flowchart LR
 
 [artifact_registry.json](car_app/artifact_registry.json) owns exact checkpoint policies. Completion requires metadata, predictor, nonempty validation/test receipts, and metrics per estimator, including estimators from active runs. Incomplete retries cannot hide completed checkpoints. Full CPU LightGBM additionally requires its shard-serialization receipt. Pending estimators remain visible without an incompatible fallback.
 
-Historical diagnostics filter the saved evaluation receipt directly for decoded cohort, original advertised price, mileage, and condition when present. Filters requiring absent fields (such as body, fuel, or drivetrain) still require matching source hashes. Source exports therefore do not block receipt-only diagnostics or certify old models for current inference. Feature importance uses caches bound to the exact checkpoint and frozen inputs; regenerate missing caches after changing selected checkpoints, without training:
+Historical diagnostics can filter saved receipts by decoded cohort, advertised price, mileage, and condition when those fields are present. Filters on other fields, such as body, fuel, or drivetrain, need matching source hashes. Inference compatibility is checked separately. Feature importance caches bind to the checkpoint and frozen inputs. Refresh missing caches after changing checkpoints.
 
 ```powershell
 .\.venv\Scripts\python.exe -m car_app.model_registry --refresh-diagnostic-explanations
@@ -374,16 +379,17 @@ Inference verifies feature order, preprocessing, packages, source and predictor 
 
 ### Conversational vehicle recommendation
 
-The [agent contract](MODELS/AI_AGENT_RECOMMENDATION_PLAN.md) owns tools, evidence requirements, checkpoint selection, request limits, and validation. Budget is an inclusive ceiling. Preset/custom budget and mileage caps accept values such as `18k` and `75k`; optional requirements stay under **Additional preferences**. Hard requirements use observed listing facts; unknown required facts fail.
+Budget is inclusive. Custom budget and mileage caps accept values such as `18k` and `75k`. Use **Additional preferences** for optional requirements. Hard filters require observed listing facts. [Tools, evidence, and validation](MODELS/AI_AGENT_RECOMMENDATION_PLAN.md)
 
-Only **Get AI recommendations**, follow-up, or retry calls OpenAI. Root `.env` supplies `OPENAI_API_KEY` and `OPENAI_MODEL` (currently `gpt-6-luna`); process values take precedence. Navigation, downloads and local Full CatBoost training/validation/scoring make no provider request. Failures show AI-unavailable status and separately labeled basic catalog results.
+**Get AI recommendations**, follow-ups, and retries call OpenAI. Root `.env` supplies `OPENAI_API_KEY` and `OPENAI_MODEL` (currently `gpt-6-luna`). Process values take precedence. On failure, the app reports AI unavailability and shows basic catalog results.
 
-The AI retrieves dictionary definitions, qualifying candidates, saved specification context, available tree and linear price evidence, and dated source evidence before returning validated IDs. It receives global feature explanations with their scales, not local or causal explanations. A rejected final response gets one automatic correction attempt within the same time and tool limits; persistent validation failures show a safe reason when available. Every card explains its match, tradeoff, and comparison with the winner. **Refine these recommendations** updates the result set and form. **Explore supporting evidence** exposes coverage/provenance/downloads; the group-research explorer loads only when enabled. Dictionary/source/model changes require fresh submission.
+The AI retrieves dictionary definitions, eligible candidates, saved specifications, price estimates, and dated source evidence. Each card explains the match, tradeoff, and comparison with the winner. **Explore supporting evidence** shows separate estimates, global importance, and per-vehicle baseline and signed contributions on the log-price scale. It also provides provenance and downloads. Enable the group-research explorer to load it. **Refine these recommendations** updates the list and form. Resubmit after a dictionary, source, or model change.
 
 ```mermaid
 flowchart LR
-  R[Submitted preferences] --> E[Retrieve candidate evidence]
-  E --> V[Validate AI response]
+  R[Submitted preferences] --> E[Retrieve eligible candidates and source evidence]
+  E --> P[Verify price estimates and signed feature contributions]
+  P --> V[Validate AI response]
   V -->|Rejected| C[One correction attempt]
   C --> V
   V -->|Accepted| A[Recommendations]
@@ -405,7 +411,7 @@ The explicit `python -m car_app.agent --live-smoke` command makes at most two re
 
 ## Research Papers
 
-Focused literature review, October 27, 2026; implementation comparisons updated November 4. The presentation comparisons for Lessmann and Voß, Fayyaz et al., and Le et al. were checked against the publisher abstract or full manuscript on November 10. Gaps below are comparative opportunities inferred from study scope, not demonstrated project gains. Some studies were available only through abstracts or publisher previews. Their reported metrics were not reproduced and are not directly comparable across datasets, targets, currencies, and splits.
+Literature review dated October 27, 2026, with implementation comparisons updated November 4. The presentation comparisons for Lessmann and Voß, Fayyaz et al., and Le et al. were checked against publisher abstracts or full manuscripts on November 10. Some comparisons rely on abstracts or previews. The project did not reproduce the papers' metrics, which use different datasets, targets, currencies, and splits.
 
 ### Vehicle recommendation
 

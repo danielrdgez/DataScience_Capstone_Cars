@@ -1,14 +1,10 @@
 # Raw-source YouTube text features on an RTX 2060 Super
 
-Implemented 2026-10-05. This is the recommended entry point for new runs:
-`YOUTUBE/text_pipeline.py`. The previous `sentiment_pipeline.py`, relevance tools,
-annotation files and output snapshots remain available for comparison.
+Use `YOUTUBE/text_pipeline.py` for new runs. The GPU workflow was implemented on 2026-10-05. The older `sentiment_pipeline.py`, relevance tools, labels, and snapshots support historical comparisons.
 
 ## Models and why these defaults
 
-There is no established best model for this unlabeled automotive corpus. These
-defaults balance the public model evidence, the 8 GB GPU and the cost of processing
-1.98 million comments. The pipeline freezes each downloaded model's commit SHA.
+The defaults fit an 8 GB GPU and account for the cost of processing 1.98 million comments. The pipeline pins downloaded model commits. Comparative accuracy on this automotive corpus remains unmeasured.
 
 | Role | Default | Rationale and limits |
 |---|---|---|
@@ -117,15 +113,9 @@ experiment. Canonical make tokens/known aliases are masked for semantic encoding
 by default; `--keep-make-tokens` requires separately trained reducer artifacts for
 an identity sensitivity run. Model-name identity can still remain in text.
 
-Aggregation uses a disk-backed SQLite intermediate and streams one make/scope
-group at a time instead of loading all full-source predictions into RAM. It
-deduplicates exact normalized text within video/make/scope, preserving punctuation
-and emojis, counts each comment once per topic/aspect, averages within video and
-then equally across videos. It exports video, long make and wide make Parquets for
-cumulative and trailing-12-month windows. Missing/suppressed measurements stay
-null, with explicit missing flags and coverage. Support defaults to 20 comments
-and five videos for semantic/topics; sentiment needs 20 resolved opinions and five
-opinion-bearing videos. Neutral and mixed opinions remain in the net denominator.
+Aggregation streams one make/scope group at a time from disk-backed SQLite. It deduplicates normalized text within video/make/scope, preserving punctuation and emojis. Count each comment once per topic or aspect, average within each video, then weight videos equally. Outputs include video, long make, and wide make Parquets for cumulative and trailing-12-month windows.
+
+By default, semantic and topic measures require 20 comments across five videos. Sentiment requires 20 resolved opinions across five opinion-bearing videos, with neutral and mixed opinions included in the net denominator. Missing or suppressed measurements stay null, with flags and coverage counts.
 `--exclude-cross-video-repeats` produces a separate repeat sensitivity run.
 
 ## Resume and troubleshooting
@@ -236,4 +226,4 @@ must be addressed before historical price claims. An earlier cutoff needs teache
 students and the reducer prepared/trained with that earlier text cutoff; later-fit
 artifacts are rejected. All dated features remain retrospective extractions.
 
-The [legacy sentiment plan](EXPERIMENTAL_SENTIMENT_FEATURE_PLAN.md#expert-reference-and-evaluation) owns the separate `expert`/`compare` commands; [expert integration](../../EXPERT_REVIEWS/DOUGSCORE_INTEGRATION_PLAN.md) owns review matching. Price workflows and matched ablations are in the [README](../../README.md#nhtsa-and-youtube-feature-comparison). Select one make/scope/date/window row per listing to prevent row multiplication. Make-level opinions remain distinct from cohort outcomes; independent automotive NLP validation is still pending.
+Select one make/scope/date/window row per listing to prevent row multiplication. The opinions describe makes. Independent automotive NLP validation remains pending. [Expert comparison commands](EXPERIMENTAL_SENTIMENT_FEATURE_PLAN.md#expert-reference-and-evaluation) · [Review matching](../../EXPERT_REVIEWS/DOUGSCORE_INTEGRATION_PLAN.md) · [Price workflows and matched ablations](../../README.md#nhtsa-and-youtube-feature-comparison)

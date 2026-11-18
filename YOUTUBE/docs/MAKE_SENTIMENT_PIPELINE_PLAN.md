@@ -1,10 +1,10 @@
 # Supervised YouTube relevance and sentiment plan
 
-New labeling remains deferred. Use the [GPU runbook](GPU_TEXT_RUNBOOK.md) for the implemented raw-source pipeline. This document retains the optional supervised validation design; [the relevance runbook](RELEVANCE_ROUND_RUNBOOK.md) owns commands and recovery, and [the label guide](MAKE_SENTIMENT_LABEL_GUIDE.md) owns annotation semantics.
+New labeling is deferred. For the optional supervised route, follow the relevance runbook and labeling guide. Use the GPU runbook for new raw-source runs. [Relevance runbook](RELEVANCE_ROUND_RUNBOOK.md) · [Label guide](MAKE_SENTIMENT_LABEL_GUIDE.md) · [GPU runbook](GPU_TEXT_RUNBOOK.md)
 
 ## Current checkpoint
 
-Recorded October 1, 2026; these are saved-run observations, not a fresh annotation audit.
+Saved-run checkpoint from October 1, 2026.
 
 | Item | Verified state |
 | --- | --- |
@@ -41,7 +41,7 @@ All records from a comment/video stay in one partition; normalized duplicates mu
 
 ## Proposed supervised outputs
 
-These names describe the deferred supervised route, distinct from implemented `text_pipeline.py` exports.
+These exports are proposed for the deferred supervised route. `text_pipeline.py` produces the current raw-source exports.
 
 | Artifact | Grain / contents |
 | --- | --- |

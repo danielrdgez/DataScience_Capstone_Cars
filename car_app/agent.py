@@ -26,7 +26,7 @@ LOG = logging.getLogger(__name__)
 MAX_TURNS = 5
 DEADLINE_SECONDS = 120
 MAX_CONTEXT_CHARS = 128000
-RESULT_SCHEMA_VERSION = 4
+RESULT_SCHEMA_VERSION = 5
 RETRYABLE_VALIDATION_ERRORS = frozenset({
     "Response exceeds the shortlist limits",
     "Duplicate recommendation IDs",
@@ -313,8 +313,18 @@ Prices are USD outputs already. Use only the selected tree and linear price mode
 Compare their estimates separately; do not invent an ensemble or average. Use saved held_out_test or out_of_fold
 predictions for historical model-relative value. Supplemental inference may include fitting VINs and cannot
 establish held-out model-relative value, evaluation accuracy or a verified discount.
-These are historical advertised-price estimates, not current valuations or verified discounts. No calibrated interval is supplied. Global importance is not
-a local or causal explanation. Mileage and fuel-economy units are unverified: NEVER label measurements as miles,
+These are historical advertised-price estimates, not current valuations or verified discounts. No calibrated interval is supplied.
+When price matters to a comparison, discuss material agreement or disagreement between the available estimates.
+When explaining an individual estimate, use that candidate's verified signed contributions. Name the main
+upward or downward drivers for the relevant models in plain language and cite the candidate's price_evidence
+reference. Positive terms raise the model estimate relative to its baseline and negative terms lower it.
+The terms are additive in natural-log price; never state their raw values as dollars, causal effects, or changes
+in the advertised asking price. Skip a vehicle-specific driver if its attribution is unavailable.
+Use the selected checkpoints' global feature explanations where relevant to describe what each price model emphasizes.
+Mean absolute SHAP measures overall contribution magnitude and has no direction. Signed linear coefficients
+describe changes on the fitted model's scale per unit of the encoded input, holding other inputs fixed.
+Keep their scales separate. Never use global importance to assign a contribution to an individual vehicle,
+infer causality, or weight buyer preferences. Mileage and fuel-economy units are unverified: NEVER label measurements as miles,
 kilometers, mpg, or mpge; say 'source units' everywhere including candidate reasons.
 Make-level YouTube and family/make expert opinions are not VIN/trim facts.
 NHTSA complaints are allegations and counts are not failure rates; themes and distances are not safety/reliability scores.
@@ -371,7 +381,7 @@ def agent_tools(conversation):
 
     @function_tool
     def get_price_evidence(candidate_ids: list[str]) -> str:
-        """Obtain selected tree and linear held-out or supplemental inference prices with provenance for up to six IDs."""
+        """Obtain price estimates, predictor provenance and signed price drivers for up to six IDs."""
         return safe("get_price_evidence", lambda: conversation.require_context().prices(candidate_ids))
 
     @function_tool

@@ -79,22 +79,22 @@ def refresh_table(connection, dataset, table, document):
     stats = {}
     names = list(schema)
     for start in range(0, len(names), 4):
+        batch = {name: missing_condition(table, name, schema[name]) for name in names[start:start + 4]}
         expressions = []
-        for name in names[start:start + 4]:
-            missing = missing_condition(table, name, schema[name])
+        for name, missing in batch.items():
             expressions.extend([
                 f"count(*) FILTER (WHERE {missing})",
                 f"count(DISTINCT CASE WHEN NOT {missing} THEN {quoted(name)} END)",
             ])
         measured = connection.execute(f"SELECT {', '.join(expressions)} FROM {source}").fetchone()
-        for index, name in enumerate(names[start:start + 4]):
-            missing = missing_condition(table, name, schema[name])
+        for index, (name, missing) in enumerate(batch.items()):
             candidates = connection.execute(
                 f"SELECT DISTINCT {quoted(name)} FROM {source} WHERE NOT {missing} LIMIT 5"
             ).fetchall()
             stats[name] = (measured[index * 2], measured[index * 2 + 1], [v[0] for v in candidates])
         print(f"{table}: profiled {min(start + 4, len(names))}/{len(names)} fields", flush=True)
-    if (path.stat().st_size, path.stat().st_mtime_ns) != (original_stat.st_size, original_stat.st_mtime_ns):
+    current_stat = path.stat()
+    if (current_stat.st_size, current_stat.st_mtime_ns) != (original_stat.st_size, original_stat.st_mtime_ns):
         raise ValueError(f"Source file changed during profiling: {table}")
 
     def replace_row(row_match):
@@ -111,7 +111,7 @@ def refresh_table(connection, dataset, table, document):
     inventory = rf"^\| `{re.escape(table)}` \| [^\n]+$"
     def replace_inventory(row_match):
         cells = row_match.group(0).strip("| ").split(" | ")
-        cells[1:4] = [f"{rows:,}", str(len(schema)), f"{path.stat().st_size / 2**20:.2f}"]
+        cells[1:4] = [f"{rows:,}", str(len(schema)), f"{current_stat.st_size / 2**20:.2f}"]
         return "| " + " | ".join(cells) + " |"
     document = re.sub(inventory, replace_inventory, document, count=1, flags=re.M)
     return document
@@ -138,7 +138,7 @@ def main():
     if re.search(r"^\*\*Profile verification:\*\*.*$", document, re.M):
         document = re.sub(r"^\*\*Profile verification:\*\*.*$", note, document, flags=re.M)
     else:
-        document = document.replace("\n## Classification guide", "\n" + note + "\n\n## Classification guide", 1)
+        document = document.rstrip() + "\n\n" + note + "\n"
     args.dictionary.write_text(document, encoding="utf-8")
     print(f"Updated {args.dictionary}; source data unchanged.", flush=True)
 
